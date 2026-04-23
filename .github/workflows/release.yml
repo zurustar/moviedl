@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install Wails
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      - name: Build
+        run: |
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          wails build -platform darwin/arm64
+
+      - name: Package
+        run: |
+          cd build/bin
+          zip -r moviedl-macos.zip moviedl.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-build
+          path: build/bin/moviedl-macos.zip
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install Wails
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      - name: Embed ffmpeg (Windows amd64)
+        shell: bash
+        run: |
+          curl -L https://github.com/yt-dlp/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip -o ffmpeg.zip
+          unzip ffmpeg.zip "*/bin/ffmpeg.exe" -d ffmpeg_extract
+          find ffmpeg_extract -name ffmpeg.exe | head -1 | xargs -I{} cp {} embedded/ffmpeg.exe
+
+      - name: Build
+        shell: bash
+        run: |
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          wails build -platform windows/amd64
+
+      - name: Package
+        run: Compress-Archive -Path build\bin\moviedl.exe -DestinationPath build\bin\moviedl-windows.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: build\bin\moviedl-windows.zip
+
+  release:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/macos-build/moviedl-macos.zip
+            artifacts/windows-build/moviedl-windows.zip
+          generate_release_notes: true
