@@ -18,6 +18,10 @@ export function CheckYtDlp() {
   return window['go']['main']['App']['CheckYtDlp']();
 }
 
+export function FetchPlaylist(arg1) {
+  return window['go']['main']['App']['FetchPlaylist'](arg1);
+}
+
 export function FfmpegInstallHint() {
   return window['go']['main']['App']['FfmpegInstallHint']();
 }
@@ -30,6 +34,18 @@ export function InstallYtDlp() {
   return window['go']['main']['App']['InstallYtDlp']();
 }
 
+export function PauseDownload(arg1) {
+  return window['go']['main']['App']['PauseDownload'](arg1);
+}
+
+export function ResumeDownload(arg1) {
+  return window['go']['main']['App']['ResumeDownload'](arg1);
+}
+
 export function SelectDirectory() {
   return window['go']['main']['App']['SelectDirectory']();
+}
+
+export function StartDownload(arg1) {
+  return window['go']['main']['App']['StartDownload'](arg1);
 }

@@ -42,19 +42,134 @@ ffmpeg がない場合:
 
 ---
 
-## キュー
+## ダウンロード状態管理
 
-- `App` 構造体がバッファ付きチャネル（`chan *DownloadItem`、容量 100）を持つ
-- URL 登録時にアイテムをチャネルに送信する
-- 単一のワーカー goroutine がチャネルを順番に読み取り、1 件ずつ処理する
+### 単一リストモデル
+
+`App` 構造体は `items []*DownloadItem` の単一リストでアイテムを管理する（順序＝表示順序）。  
+各アイテムの状態は `Status` フィールドで表す。チャネルベースの単一ワーカーは廃止する。
+
+```go
+type App struct {
+    ctx     context.Context
+    mu      sync.Mutex
+    items   []*DownloadItem  // 登録順に並ぶ単一リスト
+    schedCh chan struct{}     // 状態変化通知用（バッファ 1）
+}
+```
+
+`DownloadItem.Status` の取り得る値:
+
+| 値 | 意味 |
+|---|---|
+| `"queued"` | 待機中 |
+| `"downloading"` | ダウンロード中 |
+| `"paused"` | 一時停止中 |
+| `"finished"` | 完了 |
+| `"error"` | エラー |
+| `"cancelled"` | キャンセル済み |
+
+### 自動補充ルール（scheduler）
+
+`scheduler()` goroutine が `schedCh chan struct{}` を監視する。  
+状態変化が発生するたびに `schedCh` へ通知を送る（バッファ 1 なので重複通知はまとめられる）。  
+`scheduler` は通知を受けるたびに以下を評価する:
+
+```
+items の中に Status == "downloading" のものが存在しない
+かつ
+items の中に Status == "queued" のものが存在する
+  → 最初の "queued" アイテムを "downloading" に変更し goroutine を起動
+```
+
+`"downloading"` が 1 件でもあれば何もしない（手動開始ではない限り追加起動しない）。
+
+### 手動開始（StartDownload）
+
+`StartDownload(id string)` を JS から呼ぶと:
+
+1. `items` の中から該当アイテムを探す（Status が `"queued"` または `"paused"` であること）
+2. Status を `"downloading"` に変更し、ダウンロード goroutine を起動する
+3. `schedCh` に通知（scheduler は `"downloading"` が存在するため何もしない）
+
+### ダウンロード完了時
+
+`runDownload` goroutine が終了するとき（成功・失敗・キャンセル問わず）:
+
+1. Status を最終状態（`"finished"` / `"error"` / `"cancelled"`）に更新する
+2. `schedCh` に通知する（`"downloading"` が 0 件になった場合、scheduler が次を自動起動）
+
+---
+
+## 一時停止・再開
+
+### 一時停止（PauseDownload）
+
+1. 該当アイテムの Status を `"paused"` に変更する
+2. プロセスをサスペンドする（プラットフォーム別）
+3. `schedCh` に通知する（`"downloading"` が 0 件になった場合、scheduler が次を自動起動）
+
+### 再開（ResumeDownload）
+
+1. 該当アイテムの Status を `"downloading"` に変更する
+2. プロセスをレジュームする（プラットフォーム別）
+
+### プラットフォーム別サスペンド実装
+
+| プラットフォーム | 一時停止 | 再開 |
+|---|---|---|
+| macOS / Linux | `cmd.Process.Signal(syscall.SIGSTOP)` | `cmd.Process.Signal(syscall.SIGCONT)` |
+| Windows | `NtSuspendProcess` (syscall 経由) | `NtResumeProcess` (syscall 経由) |
+
+実装は `sysproc_windows.go` / `sysproc_other.go` に分けて定義する:
+
+```go
+// sysproc_other.go
+func suspendProcess(cmd *exec.Cmd) error { return cmd.Process.Signal(syscall.SIGSTOP) }
+func resumeProcess(cmd *exec.Cmd) error  { return cmd.Process.Signal(syscall.SIGCONT) }
+
+// sysproc_windows.go
+func suspendProcess(cmd *exec.Cmd) error { /* NtSuspendProcess */ }
+func resumeProcess(cmd *exec.Cmd) error  { /* NtResumeProcess  */ }
+```
+
+---
+
+## プレイリスト・ファイル選択
+
+### フロー
+
+1. ユーザーが URL を入力して「情報取得」を実行する
+2. Go 側で `yt-dlp --flat-playlist --dump-json --no-download URL` を実行する
+3. 複数エントリが含まれる場合、エントリ一覧（ID・タイトル・サムネイル等）を JS に返す
+4. フロントエンドが選択 UI を表示し、ユーザーがダウンロードしたいエントリを選ぶ
+5. 「追加」を押すと選択されたエントリが個別の `DownloadItem` として `items` の末尾に追加される
+
+単一動画 URL の場合は従来どおり直接 `items` に追加する。
+
+### Go 側 API
+
+```go
+// FetchPlaylist はURLの内容を返す。単一動画の場合は1件のスライス。
+func (a *App) FetchPlaylist(url string) ([]PlaylistEntry, error)
+
+type PlaylistEntry struct {
+    ID        string `json:"id"`
+    URL       string `json:"url"`
+    Title     string `json:"title"`
+    Thumbnail string `json:"thumbnail"`
+    Duration  string `json:"duration"`
+}
+```
 
 ---
 
 ## キャンセル
 
-- 各アイテムは atomic フラグ（`int32`）でキャンセル状態を管理する
-- 待機中: ワーカーがキャンセルフラグを確認してスキップする
-- ダウンロード中: `cmd.Process.Kill()` でプロセスを強制終了する
+- `items` のいずれのアイテムもキャンセルできる
+- `"queued"`: Status を `"cancelled"` に更新するだけ（プロセスなし）
+- `"paused"`: プロセスを `Kill()` してから Status を `"cancelled"` に更新する
+- `"downloading"`: `cmd.Process.Kill()` で強制終了する（goroutine 終了時に Status が更新される）
 
 ---
 

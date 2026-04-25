@@ -17,6 +17,7 @@
       --dim:      #7070a0;
       --ok:       #4caf50;
       --err:      #f44336;
+      --warn:     #ff9800;
     }
 
     body {
@@ -95,6 +96,20 @@
     button:hover:not(:disabled) { background: var(--accent-h); }
     button:disabled { opacity: .45; cursor: not-allowed; }
     button.sm { padding: 4px 10px; font-size: 12px; }
+    button.ghost {
+      background: transparent;
+      color: var(--dim);
+      border: 1px solid var(--border);
+      padding: 3px 9px;
+      font-size: 12px;
+      border-radius: 4px;
+      line-height: 1.4;
+    }
+    button.ghost:hover:not(:disabled) { background: transparent; color: var(--text); border-color: var(--text); }
+    button.ghost.pause:hover:not(:disabled) { color: var(--warn); border-color: var(--warn); }
+    button.ghost.cancel:hover:not(:disabled) { color: var(--err); border-color: var(--err); }
+    button.ghost.start { color: var(--ok); border-color: var(--ok); }
+    button.ghost.start:hover:not(:disabled) { color: var(--ok); border-color: var(--ok); background: rgba(76,175,80,.1); }
 
     .dir-row { display: flex; align-items: center; gap: 8px; }
     .dir-label { color: var(--dim); font-size: 12px; flex-shrink: 0; }
@@ -120,23 +135,11 @@
     .dl-item.error      { border-color: #4a2a2a; }
     .dl-item.cancelled  { opacity: .5; }
     .dl-item.queued     { opacity: .65; }
+    .dl-item.paused     { border-color: #4a3a1a; }
 
-    /* title row with cancel button */
     .dl-header { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
     .dl-title  { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .btn-cancel {
-      flex-shrink: 0;
-      background: transparent;
-      color: var(--dim);
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      padding: 1px 7px;
-      font-size: 13px;
-      line-height: 1.4;
-      cursor: pointer;
-      transition: color .15s, border-color .15s;
-    }
-    .btn-cancel:hover { color: var(--err); border-color: var(--err); background: transparent; }
+    .dl-actions { display: flex; gap: 4px; flex-shrink: 0; }
 
     .progress-bar {
       height: 4px; background: var(--border);
@@ -150,11 +153,13 @@
     .dl-item.error     .progress-fill { background: var(--err); }
     .dl-item.queued    .progress-fill { background: var(--border); }
     .dl-item.cancelled .progress-fill { background: var(--border); }
+    .dl-item.paused    .progress-fill { background: var(--warn); }
 
     .dl-meta { font-size: 11px; color: var(--dim); display: flex; flex-wrap: wrap; gap: 0 12px; }
     .dl-meta .seg { white-space: nowrap; }
     .ok   { color: var(--ok); }
     .err  { color: var(--err); }
+    .paused-label { color: var(--warn); }
     .cancelled-label { color: var(--dim); }
 
     .empty { text-align: center; color: var(--dim); padding: 40px 0; font-size: 13px; }
@@ -162,6 +167,57 @@
     #downloads-wrap::-webkit-scrollbar { width: 6px; }
     #downloads-wrap::-webkit-scrollbar-track { background: transparent; }
     #downloads-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    /* ---- playlist modal ---- */
+    .modal-overlay {
+      display: none;
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,.7);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      width: min(560px, 90vw);
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .modal h2 { font-size: 15px; font-weight: 600; }
+    .modal-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+    .modal-entry {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      cursor: pointer;
+      transition: border-color .15s;
+    }
+    .modal-entry:hover { border-color: var(--accent); }
+    .modal-entry.selected { border-color: var(--accent); background: rgba(108,99,255,.1); }
+    .modal-entry input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; flex-shrink: 0; cursor: pointer; }
+    .modal-entry-info { flex: 1; overflow: hidden; }
+    .modal-entry-title { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .modal-entry-dur { font-size: 11px; color: var(--dim); }
+    .modal-footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .modal-sel-count { font-size: 12px; color: var(--dim); }
+    .modal-btns { display: flex; gap: 8px; }
+    .btn-secondary {
+      background: transparent;
+      color: var(--dim);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 7px 14px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    .btn-secondary:hover { border-color: var(--text); color: var(--text); }
   </style>
 </head>
 <body>
@@ -180,8 +236,8 @@
   <div class="card">
     <div class="url-row">
       <input type="text" id="url-input" placeholder="動画の URL を入力…"
-             onkeydown="if(event.key==='Enter') startDownload()" />
-      <button onclick="startDownload()">ダウンロード</button>
+             onkeydown="if(event.key==='Enter') addURL()" />
+      <button id="add-btn" onclick="addURL()">追加</button>
     </div>
     <div class="dir-row">
       <span class="dir-label">保存先:</span>
@@ -195,11 +251,30 @@
     <div id="dl-list"><div class="empty">URL を入力してダウンロードを開始</div></div>
   </div>
 
+  <!-- playlist selection modal -->
+  <div class="modal-overlay" id="playlist-modal">
+    <div class="modal">
+      <h2 id="modal-title">動画を選択</h2>
+      <div class="modal-list" id="modal-list"></div>
+      <div class="modal-footer">
+        <span class="modal-sel-count" id="modal-sel-count"></span>
+        <div class="modal-btns">
+          <button class="btn-secondary" onclick="closeModal()">キャンセル</button>
+          <button id="modal-add-btn" onclick="confirmPlaylist()">キューに追加</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script>
     'use strict';
 
     let saveDir = '';
-    const downloads = {};
+    const downloads = {};       // id → item
+    const downloadOrder = [];   // insertion order
+
+    let pendingEntries = [];    // playlist entries waiting for user selection
+    let pendingURL = '';        // original URL (single-video fallback)
 
     async function init() {
       try {
@@ -228,12 +303,83 @@
       }
     }
 
-    async function startDownload() {
+    async function addURL() {
       const input = document.getElementById('url-input');
       const url = input.value.trim();
       if (!url) return;
+
+      const btn = document.getElementById('add-btn');
+      btn.disabled = true;
+      btn.textContent = '取得中…';
       input.value = '';
-      await window.go.main.App.AddToQueue(url, saveDir);
+
+      try {
+        const entries = await window.go.main.App.FetchPlaylist(url);
+        if (entries.length === 1) {
+          await window.go.main.App.AddToQueue(entries[0].url, saveDir);
+        } else {
+          openModal(entries);
+        }
+      } catch (e) {
+        alert('エラー: ' + e);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '追加';
+      }
+    }
+
+    function openModal(entries) {
+      pendingEntries = entries;
+      const list = document.getElementById('modal-list');
+      list.innerHTML = entries.map((e, i) => `
+        <label class="modal-entry selected" id="me-${i}">
+          <input type="checkbox" checked onchange="updateModalCount()" data-i="${i}" />
+          <div class="modal-entry-info">
+            <div class="modal-entry-title" title="${esc(e.title || e.url)}">${esc(e.title || e.url)}</div>
+            ${e.duration ? `<div class="modal-entry-dur">${esc(e.duration)}</div>` : ''}
+          </div>
+        </label>
+      `).join('');
+      updateModalCount();
+      document.getElementById('playlist-modal').classList.add('open');
+    }
+
+    function updateModalCount() {
+      const checks = document.querySelectorAll('#modal-list input[type=checkbox]');
+      let sel = 0;
+      checks.forEach((c, i) => {
+        sel += c.checked ? 1 : 0;
+        document.getElementById('me-' + i).classList.toggle('selected', c.checked);
+      });
+      document.getElementById('modal-sel-count').textContent = `${sel} / ${pendingEntries.length} 件選択中`;
+      document.getElementById('modal-add-btn').disabled = sel === 0;
+    }
+
+    function closeModal() {
+      document.getElementById('playlist-modal').classList.remove('open');
+      pendingEntries = [];
+    }
+
+    async function confirmPlaylist() {
+      const checks = document.querySelectorAll('#modal-list input[type=checkbox]');
+      const selected = [];
+      checks.forEach((c, i) => { if (c.checked) selected.push(pendingEntries[i]); });
+      closeModal();
+      for (const e of selected) {
+        await window.go.main.App.AddToQueue(e.url, saveDir);
+      }
+    }
+
+    async function startDownload(id) {
+      await window.go.main.App.StartDownload(id);
+    }
+
+    async function pauseDownload(id) {
+      await window.go.main.App.PauseDownload(id);
+    }
+
+    async function resumeDownload(id) {
+      await window.go.main.App.ResumeDownload(id);
     }
 
     async function cancelDownload(id) {
@@ -256,27 +402,48 @@
 
     function render() {
       const list = document.getElementById('dl-list');
-      const items = Object.values(downloads);
+      const ids = downloadOrder.filter(id => downloads[id]);
 
-      if (!items.length) {
+      if (!ids.length) {
         list.innerHTML = '<div class="empty">URL を入力してダウンロードを開始</div>';
         return;
       }
 
-      const queued = items.filter(d => d.status === 'queued');
+      const queuedItems = ids.filter(id => downloads[id].status === 'queued');
 
-      list.innerHTML = items.map(d => {
+      list.innerHTML = ids.map(id => {
+        const d = downloads[id];
         const label = d.title || d.url;
-        const pct   = d.percent || 0;
-        const cancellable = d.status === 'queued' || d.status === 'downloading';
-        const cancelBtn = cancellable
-          ? `<button class="btn-cancel" onclick="cancelDownload('${esc(d.id)}')" title="キャンセル">×</button>`
-          : '';
+        const pct = d.percent || 0;
 
+        // action buttons
+        let actions = '';
+        if (d.status === 'queued') {
+          actions = `
+            <button class="ghost start" onclick="startDownload('${esc(d.id)}')" title="今すぐ開始">▶</button>
+            <button class="ghost cancel" onclick="cancelDownload('${esc(d.id)}')" title="キャンセル">×</button>
+          `;
+        } else if (d.status === 'downloading') {
+          actions = `
+            <button class="ghost pause" onclick="pauseDownload('${esc(d.id)}')" title="一時停止">⏸</button>
+            <button class="ghost cancel" onclick="cancelDownload('${esc(d.id)}')" title="キャンセル">×</button>
+          `;
+        } else if (d.status === 'paused') {
+          actions = `
+            <button class="ghost start" onclick="resumeDownload('${esc(d.id)}')" title="再開">▶</button>
+            <button class="ghost cancel" onclick="cancelDownload('${esc(d.id)}')" title="キャンセル">×</button>
+          `;
+        }
+
+        // status text
         let segs = [];
         if (d.status === 'queued') {
-          const pos = queued.indexOf(d) + 1;
-          segs.push(`<span class="seg waiting">待機中 ${pos} / ${queued.length}</span>`);
+          const pos = queuedItems.indexOf(d.id) + 1;
+          segs.push(`<span class="seg">待機中 ${pos} / ${queuedItems.length}</span>`);
+        } else if (d.status === 'paused') {
+          segs.push(`<span class="seg paused-label">一時停止中</span>`);
+          segs.push(`<span class="seg">${pct.toFixed(1)}%</span>`);
+          if (d.totalSize) segs.push(`<span class="seg">${esc(d.totalSize)}</span>`);
         } else if (d.status === 'finished') {
           segs.push('<span class="seg ok">完了</span>');
           if (d.totalSize) segs.push(`<span class="seg">${esc(d.totalSize)}</span>`);
@@ -297,7 +464,7 @@
         return `<div class="dl-item ${d.status}">
           <div class="dl-header">
             <div class="dl-title" title="${esc(label)}">${esc(label)}</div>
-            ${cancelBtn}
+            <div class="dl-actions">${actions}</div>
           </div>
           <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
           <div class="dl-meta">${segs.join('')}</div>
@@ -312,6 +479,7 @@
     }
 
     window.runtime.EventsOn('download:update', item => {
+      if (!downloads[item.id]) downloadOrder.push(item.id);
       downloads[item.id] = item;
       render();
     });

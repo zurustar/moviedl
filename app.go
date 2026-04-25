@@ -22,10 +22,10 @@ import (
 )
 
 type App struct {
-	ctx    context.Context
-	mu     sync.Mutex
-	items  []*DownloadItem
-	workCh chan *DownloadItem
+	ctx     context.Context
+	mu      sync.Mutex
+	items   []*DownloadItem
+	schedCh chan struct{}
 }
 
 type DownloadItem struct {
@@ -37,40 +37,81 @@ type DownloadItem struct {
 	TotalSize string  `json:"totalSize"`
 	ETA       string  `json:"eta"`
 	Elapsed   string  `json:"elapsed"`
-	Status    string  `json:"status"` // "queued"|"downloading"|"finished"|"error"|"cancelled"
+	Status    string  `json:"status"` // "queued"|"downloading"|"paused"|"finished"|"error"|"cancelled"
 	Error     string  `json:"error,omitempty"`
 
-	outputDir   string
-	cmd         *exec.Cmd
-	startedAt   time.Time
-	cancelFlag  int32 // atomic: 1 = cancelled
+	outputDir  string
+	cmd        *exec.Cmd
+	startedAt  time.Time
+	cancelFlag int32 // atomic: 1 = cancelled
 }
 
 func (item *DownloadItem) markCancelled() { atomic.StoreInt32(&item.cancelFlag, 1) }
-func (item *DownloadItem) isCancelled() bool { return atomic.LoadInt32(&item.cancelFlag) == 1 }
+func (item *DownloadItem) isCancelled() bool {
+	return atomic.LoadInt32(&item.cancelFlag) == 1
+}
+
+type PlaylistEntry struct {
+	ID        string `json:"id"`
+	URL       string `json:"url"`
+	Title     string `json:"title"`
+	Thumbnail string `json:"thumbnail"`
+	Duration  string `json:"duration"`
+}
 
 var dlCounter int64
 
 func NewApp() *App {
 	return &App{
-		workCh: make(chan *DownloadItem, 100),
+		schedCh: make(chan struct{}, 1),
 	}
 }
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-	a.extractEmbeddedFfmpeg() //nolint:errcheck  // must finish before frontend calls CheckFfmpeg
+	a.extractEmbeddedFfmpeg() //nolint:errcheck
 	truncateLog()
 	cleanupLeftoverWorkDirs()
-	go a.worker()
+	go a.scheduler()
 }
 
-func (a *App) worker() {
-	for item := range a.workCh {
-		if item.isCancelled() {
-			continue
+// notify sends a scheduling signal (non-blocking; duplicates are coalesced).
+func (a *App) notify() {
+	select {
+	case a.schedCh <- struct{}{}:
+	default:
+	}
+}
+
+// scheduler auto-starts one item from the queue whenever the active list is empty.
+func (a *App) scheduler() {
+	for range a.schedCh {
+		a.mu.Lock()
+		var hasActive bool
+		for _, it := range a.items {
+			if it.Status == "downloading" {
+				hasActive = true
+				break
+			}
 		}
-		a.runDownload(item)
+		var next *DownloadItem
+		if !hasActive {
+			for _, it := range a.items {
+				if it.Status == "queued" {
+					next = it
+					break
+				}
+			}
+			if next != nil {
+				next.Status = "downloading"
+			}
+		}
+		a.mu.Unlock()
+
+		if next != nil {
+			a.emit(next)
+			go a.runDownload(next)
+		}
 	}
 }
 
@@ -86,6 +127,19 @@ func formatElapsed(d time.Duration) string {
 	h := total / 3600
 	m := (total % 3600) / 60
 	s := total % 60
+	if h > 0 {
+		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
+	}
+	return fmt.Sprintf("%d:%02d", m, s)
+}
+
+func formatDuration(secs int) string {
+	if secs <= 0 {
+		return ""
+	}
+	h := secs / 3600
+	m := (secs % 3600) / 60
+	s := secs % 60
 	if h > 0 {
 		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
 	}
@@ -234,6 +288,67 @@ func (a *App) InstallYtDlp() error {
 	return err
 }
 
+// FetchPlaylist fetches video entries from a URL.
+// Returns a single entry for individual videos, multiple entries for playlists.
+func (a *App) FetchPlaylist(rawURL string) ([]PlaylistEntry, error) {
+	ytdlp, err := a.ytDlpPath()
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(ytdlp,
+		"--flat-playlist", "--dump-json",
+		"--no-warnings",
+		rawURL,
+	)
+	cmd.Env = append(os.Environ(), "PYTHONUTF8=1", "PYTHONIOENCODING=utf-8")
+	applyOSProcAttr(cmd)
+
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("情報取得失敗: %w", err)
+	}
+
+	type rawEntry struct {
+		ID         string  `json:"id"`
+		URL        string  `json:"url"`
+		WebpageURL string  `json:"webpage_url"`
+		Title      string  `json:"title"`
+		Thumbnail  string  `json:"thumbnail"`
+		Duration   float64 `json:"duration"`
+	}
+
+	var entries []PlaylistEntry
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var e rawEntry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			continue
+		}
+		u := e.WebpageURL
+		if u == "" {
+			u = e.URL
+		}
+		if u == "" {
+			continue
+		}
+		entries = append(entries, PlaylistEntry{
+			ID:        e.ID,
+			URL:       u,
+			Title:     e.Title,
+			Thumbnail: e.Thumbnail,
+			Duration:  formatDuration(int(e.Duration)),
+		})
+	}
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("動画情報を取得できませんでした")
+	}
+	return entries, nil
+}
+
+// AddToQueue registers a URL as a queued item and notifies the scheduler.
 func (a *App) AddToQueue(url, outputDir string) string {
 	id := fmt.Sprintf("%d", atomic.AddInt64(&dlCounter, 1))
 	item := &DownloadItem{
@@ -247,8 +362,78 @@ func (a *App) AddToQueue(url, outputDir string) string {
 	a.mu.Unlock()
 
 	a.emit(item)
-	a.workCh <- item
+	a.notify()
 	return id
+}
+
+// StartDownload manually moves a queued item to active, bypassing the scheduler's
+// "only start when active is empty" rule — enabling parallel downloads.
+func (a *App) StartDownload(id string) {
+	a.mu.Lock()
+	var item *DownloadItem
+	for _, it := range a.items {
+		if it.ID == id && it.Status == "queued" {
+			item = it
+			break
+		}
+	}
+	if item != nil {
+		item.Status = "downloading"
+	}
+	a.mu.Unlock()
+	if item == nil {
+		return
+	}
+	a.emit(item)
+	go a.runDownload(item)
+}
+
+// PauseDownload suspends an active download and notifies the scheduler
+// so it can auto-start the next queued item if the active list is now empty.
+func (a *App) PauseDownload(id string) {
+	a.mu.Lock()
+	var item *DownloadItem
+	for _, it := range a.items {
+		if it.ID == id && it.Status == "downloading" {
+			item = it
+			break
+		}
+	}
+	if item != nil {
+		item.Status = "paused"
+	}
+	a.mu.Unlock()
+	if item == nil {
+		return
+	}
+	if item.cmd != nil {
+		suspendProcess(item.cmd) //nolint:errcheck
+	}
+	a.emit(item)
+	a.notify()
+}
+
+// ResumeDownload resumes a paused download.
+func (a *App) ResumeDownload(id string) {
+	a.mu.Lock()
+	var item *DownloadItem
+	for _, it := range a.items {
+		if it.ID == id && it.Status == "paused" {
+			item = it
+			break
+		}
+	}
+	if item != nil {
+		item.Status = "downloading"
+	}
+	a.mu.Unlock()
+	if item == nil {
+		return
+	}
+	if item.cmd != nil {
+		resumeProcess(item.cmd) //nolint:errcheck
+	}
+	a.emit(item)
 }
 
 func (a *App) CancelDownload(id string) {
@@ -267,13 +452,15 @@ func (a *App) CancelDownload(id string) {
 	}
 	item.markCancelled()
 
-	// Kill running process if any.
 	if item.cmd != nil && item.cmd.Process != nil {
+		// Resume before killing so the process can receive SIGKILL on Unix.
+		if item.Status == "paused" {
+			resumeProcess(item.cmd) //nolint:errcheck
+		}
 		item.cmd.Process.Kill() //nolint:errcheck
 	}
 
-	// If still queued (worker hasn't picked it up yet), update status immediately.
-	if item.Status == "queued" {
+	if item.Status == "queued" || item.Status == "paused" {
 		item.Status = "cancelled"
 		a.emit(item)
 	}
@@ -325,7 +512,8 @@ func logDirContents(lf *os.File, label, dir string) {
 }
 
 func (a *App) runDownload(item *DownloadItem) {
-	item.Status = "downloading"
+	defer a.notify()
+
 	item.startedAt = time.Now()
 	a.emit(item)
 
@@ -374,9 +562,6 @@ func (a *App) runDownload(item *DownloadItem) {
 	logf("[STEP2] tmpBase = %s", tmpBase)
 
 	// STEP 2a: タイトルを事前取得
-	// --print "%(title)s" は出力テンプレート評価を経るため、yt-dlp が重複 ID を検出すると " (1)" を付加する。
-	// --dump-json は生の info dict を返す。id が "-1" で終わり title が " (1)" で終わる場合は
-	// yt-dlp の内部 dedup アーティファクトなので除去する。
 	ytdlpEnv := append(os.Environ(), "PYTHONUTF8=1", "PYTHONIOENCODING=utf-8")
 	{
 		var titleStderr strings.Builder
@@ -394,8 +579,6 @@ func (a *App) runDownload(item *DownloadItem) {
 			}
 			if jerr := json.Unmarshal([]byte(firstLine), &dumpInfo); jerr == nil && dumpInfo.Title != "" {
 				title := dumpInfo.Title
-				// id が "-1" で終わり title が " (1)" で終わる場合は yt-dlp dedup アーティファクト。
-				// 両方マッチした場合のみ除去する（実タイトルに " (1)" が含まれる場合は id 末尾が "-1" にならないため保護される）。
 				if strings.HasSuffix(dumpInfo.ID, "-1") && strings.HasSuffix(title, " (1)") {
 					title = strings.TrimSuffix(title, " (1)")
 					logf("[STEP2a] dedup suffix stripped (raw id=%q)", dumpInfo.ID)
@@ -432,7 +615,7 @@ func (a *App) runDownload(item *DownloadItem) {
 	logf("[STEP2] command: %s %s", ytdlp, strings.Join(args, " "))
 
 	cmd := exec.Command(ytdlp, args...)
-	cmd.Dir = workDir // CWD を workDir にすることで yt-dlp のタイトルベース競合チェックが Downloads を見ない
+	cmd.Dir = workDir
 	cmd.Env = append(os.Environ(), "PYTHONUTF8=1", "PYTHONIOENCODING=utf-8")
 	applyOSProcAttr(cmd)
 
@@ -589,7 +772,6 @@ func unregisterWorkDir(path string) {
 	writeWorkDirRegistry(filtered)
 }
 
-// cleanupLeftoverWorkDirs removes any work directories left over from a previous crash.
 func cleanupLeftoverWorkDirs() {
 	dirs := readWorkDirRegistry()
 	for _, d := range dirs {
@@ -604,9 +786,6 @@ func sanitizeFilename(s string) string {
 	return strings.TrimRight(strings.TrimSpace(s), ". ")
 }
 
-// moveToOutputDir moves completed files from workDir to outputDir.
-// Subdirectories (e.g. the temp/ download dir) are skipped.
-// If a same-named file already exists in outputDir, a numeric suffix is added.
 func moveToOutputDir(workDir, outputDir string) error {
 	entries, err := os.ReadDir(workDir)
 	if err != nil {
@@ -638,7 +817,6 @@ func uniqueDest(dir, name string) string {
 		}
 	}
 }
-
 
 func parseYtDlpLine(line string, item *DownloadItem) {
 	line = strings.TrimSpace(line)
