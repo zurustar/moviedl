@@ -75,6 +75,17 @@ func (a *App) startup(ctx context.Context) {
 	go a.scheduler()
 }
 
+func (a *App) removeItem(id string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i, it := range a.items {
+		if it.ID == id {
+			a.items = append(a.items[:i], a.items[i+1:]...)
+			return
+		}
+	}
+}
+
 // notify sends a scheduling signal (non-blocking; duplicates are coalesced).
 func (a *App) notify() {
 	select {
@@ -463,6 +474,7 @@ func (a *App) CancelDownload(id string) {
 	if item.Status == "queued" || item.Status == "paused" {
 		item.Status = "cancelled"
 		a.emit(item)
+		a.removeItem(item.ID)
 	}
 }
 
@@ -719,6 +731,7 @@ func (a *App) runDownload(item *DownloadItem) {
 		logDirContents(lf, "outputDir after download", item.outputDir)
 	}
 	a.emit(item)
+	a.removeItem(item.ID)
 }
 
 func workDirRegistryPath() (string, error) {
