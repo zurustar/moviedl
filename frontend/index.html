@@ -136,6 +136,18 @@
     .dl-item.cancelled  { opacity: .5; }
     .dl-item.queued     { opacity: .65; }
     .dl-item.paused     { border-color: #4a3a1a; }
+    .dl-item.fetching   { border-color: #3a3a5a; opacity: .85; }
+    .dl-item.fetching .progress-fill {
+      width: 100% !important;
+      background: linear-gradient(90deg, transparent, var(--accent), transparent);
+      background-size: 200% 100%;
+      animation: fetching-shimmer 1.4s linear infinite;
+    }
+    @keyframes fetching-shimmer {
+      0%   { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+    .fetching-label { color: var(--accent); }
 
     .dl-header { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
     .dl-title  { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -235,8 +247,10 @@
 
   <div class="card">
     <div class="url-row">
-      <input type="text" id="url-input" placeholder="動画の URL を入力…"
-             onkeydown="if(event.key==='Enter') addURL()" />
+      <input type="text" id="url-input" placeholder="動画の URL を入力（ドラッグ&ドロップにも対応）…"
+             onkeydown="if(event.key==='Enter') addURL()"
+             ondragover="handleDragOver(event)"
+             ondrop="handleDrop(event)" />
       <button id="add-btn" onclick="addURL()">追加</button>
     </div>
     <div class="dir-row">
@@ -276,6 +290,17 @@
     let pendingEntries = [];    // playlist entries waiting for user selection
     let pendingURL = '';        // original URL (single-video fallback)
 
+    // 取得中の URL を可視化するためのフロントエンドローカル状態。
+    // Go 側の DownloadItem.ID とは別の名前空間（"f1", "f2", ...）。
+    const fetching = {};        // fid → { url }
+    const fetchingOrder = [];
+    let fetchCounter = 0;
+
+    // プレイリスト選択モーダルは同時に 1 つしか開けないため、
+    // 並行取得の結果が複数プレイリストを返した場合のキュー。
+    const modalQueue = [];      // [entries, ...]
+    let modalOpen = false;
+
     async function init() {
       try {
         saveDir = await window.go.main.App.GetDefaultDir();
@@ -303,32 +328,81 @@
       }
     }
 
-    async function addURL() {
+    // submitURL: 単一 URL の登録処理。「追加」ボタン経路もドロップ経路もここを通る。
+    // 取得中プレースホルダーを表示し、Go 側 FetchPlaylist を非同期で呼び出す。
+    function submitURL(rawURL) {
+      const url = (rawURL || '').trim();
+      if (!url) return;
+
+      const fid = 'f' + (++fetchCounter);
+      fetching[fid] = { url };
+      fetchingOrder.push(fid);
+      render();
+
+      // Wails の IPC 呼び出しは goroutine で実行されるため、Go 側で並列化される。
+      (async () => {
+        try {
+          const entries = await window.go.main.App.FetchPlaylist(url);
+          if (entries.length === 1) {
+            await window.go.main.App.AddToQueue(entries[0].url, saveDir);
+          } else {
+            modalQueue.push(entries);
+            tryOpenNextModal();
+          }
+        } catch (e) {
+          alert('エラー: ' + e);
+        } finally {
+          delete fetching[fid];
+          const idx = fetchingOrder.indexOf(fid);
+          if (idx !== -1) fetchingOrder.splice(idx, 1);
+          render();
+        }
+      })();
+    }
+
+    function addURL() {
       const input = document.getElementById('url-input');
       const url = input.value.trim();
       if (!url) return;
-
-      const btn = document.getElementById('add-btn');
-      btn.disabled = true;
-      btn.textContent = '取得中…';
       input.value = '';
+      submitURL(url);
+    }
 
-      try {
-        const entries = await window.go.main.App.FetchPlaylist(url);
-        if (entries.length === 1) {
-          await window.go.main.App.AddToQueue(entries[0].url, saveDir);
-        } else {
-          openModal(entries);
-        }
-      } catch (e) {
-        alert('エラー: ' + e);
-      } finally {
-        btn.disabled = false;
-        btn.textContent = '追加';
-      }
+    // text/uri-list (RFC 2483) または text/plain から URL 候補を抽出する。
+    // 改行区切りの複数 URL に対応、'#' 始まりのコメント行は除外する。
+    function parseDroppedURLs(dt) {
+      let text = dt.getData('text/uri-list');
+      if (!text) text = dt.getData('text/plain');
+      if (!text) text = dt.getData('text');
+      if (!text) return [];
+      return text.split(/\r?\n/)
+        .map(s => s.trim())
+        .filter(s => s && !s.startsWith('#'));
+    }
+
+    function handleDrop(event) {
+      event.preventDefault();
+      const urls = parseDroppedURLs(event.dataTransfer);
+      if (urls.length === 0) return;
+      // event.preventDefault() でブラウザのテキスト挿入は阻止されるので、
+      // 入力欄に既に入っていたユーザーのタイプ内容はそのまま残す。
+      for (const u of urls) submitURL(u);
+    }
+
+    function handleDragOver(event) {
+      // dragover で preventDefault を呼ばないと drop が発火しない
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+    }
+
+    function tryOpenNextModal() {
+      if (modalOpen || modalQueue.length === 0) return;
+      const entries = modalQueue.shift();
+      openModal(entries);
     }
 
     function openModal(entries) {
+      modalOpen = true;
       pendingEntries = entries;
       const list = document.getElementById('modal-list');
       list.innerHTML = entries.map((e, i) => `
@@ -358,6 +432,8 @@
     function closeModal() {
       document.getElementById('playlist-modal').classList.remove('open');
       pendingEntries = [];
+      modalOpen = false;
+      tryOpenNextModal();
     }
 
     async function confirmPlaylist() {
@@ -403,15 +479,27 @@
     function render() {
       const list = document.getElementById('dl-list');
       const ids = downloadOrder.filter(id => downloads[id]);
+      const fids = fetchingOrder.filter(fid => fetching[fid]);
 
-      if (!ids.length) {
+      if (!ids.length && !fids.length) {
         list.innerHTML = '<div class="empty">URL を入力してダウンロードを開始</div>';
         return;
       }
 
       const queuedItems = ids.filter(id => downloads[id].status === 'queued');
 
-      list.innerHTML = ids.map(id => {
+      const fetchingHTML = fids.map(fid => {
+        const f = fetching[fid];
+        return `<div class="dl-item fetching">
+          <div class="dl-header">
+            <div class="dl-title" title="${esc(f.url)}">${esc(f.url)}</div>
+          </div>
+          <div class="progress-bar"><div class="progress-fill"></div></div>
+          <div class="dl-meta"><span class="seg fetching-label">取得中…</span></div>
+        </div>`;
+      }).join('');
+
+      const downloadsHTML = ids.map(id => {
         const d = downloads[id];
         const label = d.title || d.url;
         const pct = d.percent || 0;
@@ -470,6 +558,8 @@
           <div class="dl-meta">${segs.join('')}</div>
         </div>`;
       }).join('');
+
+      list.innerHTML = fetchingHTML + downloadsHTML;
     }
 
     function esc(s) {

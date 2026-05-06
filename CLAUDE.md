@@ -1,85 +1,68 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+このファイルは Claude Code（claude.ai/code）がこのリポジトリで作業するときの作業プロセス指示です。
+ビルド方法・アーキテクチャ・設計判断・既知のピットフォールはこのファイルには書かず、適切なドキュメントへ。
 
-## Build
+## 情報の置き場所（先に正しい場所を読む / 書く）
 
-```bash
-# Development build (macOS, current arch)
-~/go/bin/wails build
+| 種別 | 置き場所 |
+|---|---|
+| ユーザー向けの使い方・配布 | [README.md](README.md) |
+| 開発環境セットアップ・ビルド・CI・リポジトリ構成 | [CONTRIBUTING.md](CONTRIBUTING.md) |
+| 要件・仕様（ユーザー視点で何ができるべきか） | [docs/requirements.md](docs/requirements.md) |
+| 設計判断・実装上の取り決め・既知のピットフォール | [docs/design.md](docs/design.md) |
+| 作業プロセス指示（このファイル） | [CLAUDE.md](CLAUDE.md) |
 
-# Production universal binary for macOS (arm64 + amd64)
-~/go/bin/wails build -platform darwin/universal
+実装に着手する前に該当ドキュメントを必ず読むこと。とくに `docs/design.md` には過去に踏んだ罠と、その対策が明文化されている。
+**読まずに修正すると同じデグレを繰り返す。**
 
-# Windows cross-compile (run on Windows runner)
-~/go/bin/wails build -platform windows/amd64
+## 作業プロセス（厳守）
 
-# Dev mode with hot-reload (frontend changes reflect immediately)
-~/go/bin/wails dev
-```
+### 1. ドキュメント先行
 
-`wails build` regenerates `frontend/wailsjs/` bindings automatically — do not edit those files by hand.
+仕様変更・機能追加・挙動変更を行うときは、コードより前に該当ドキュメントを更新する。
 
-Output lands in `build/bin/`.
+- ユーザー視点の挙動が変わる → `docs/requirements.md`
+- 実装方針・設計判断・新たなピットフォールが発生する → `docs/design.md`
+- ビルド・CI・リポジトリ構成が変わる → `CONTRIBUTING.md`
+- ユーザーが知るべき新機能 → `README.md`
 
-## Architecture
+ドキュメント更新と同じターンでコードを書いてもよいが、**ドキュメントの編集を先にコミット可能な状態にしてから**コードに移ること。
+ドキュメントが追いついていない PR は受け付けない方針で進める。
 
-This is a [Wails v2](https://wails.io) app: a Go binary that embeds a WebKit/WebView2 window serving a local HTML page. There is no Node.js or npm involved.
+### 2. ピットフォール記録
 
-### Go backend (`app.go`, `main.go`, `embed.go`)
+修正中に「なぜこれをこう書かないといけないか」が非自明な事象（=次の人が同じ罠を踏みうる事象）に出会ったら、その場で `docs/design.md` の該当節へ追記する。
+記録すべき内容: **何をしてはいけないか / なぜか / 正しい代替手段**。
 
-- `App` struct is bound to the frontend via Wails IPC. Any exported method becomes callable as `window.go.main.App.MethodName()` in JS.
-- `StartDownload(url, outputDir string) string` spawns a goroutine, runs `yt-dlp` as a subprocess, streams its stdout/stderr through `os.Pipe`, and emits `download:progress` events to the frontend via `wailsruntime.EventsEmit`.
-- yt-dlp and ffmpeg are stored in `os.UserConfigDir()/moviedl/`. yt-dlp is downloaded at runtime via `InstallYtDlp()`; ffmpeg is extracted from the embedded binary on startup via `extractEmbeddedFfmpeg()`.
-- When ffmpeg is available, yt-dlp is invoked with `-f bestvideo+bestaudio/best --merge-output-format mp4`. Without ffmpeg it falls back to `-f best[ext=mp4]/best`.
+### 3. 既存ピットフォールの再確認
 
-### Frontend (`frontend/index.html`)
+コードを変更する前に `docs/design.md` の以下の節を最低限見ること。実装上のクリティカルなルールが書かれている。
 
-Single self-contained HTML file — no framework, no build step. Communicates with Go via:
-- `window.go.main.App.*` — calling Go methods (returns Promises)
-- `window.runtime.EventsOn('download:progress', cb)` — receiving Go → JS events
+- ファイル管理 → `(1)` サフィックス問題（`-o` 指定方針、`uniqueDest` 厳守、タイトル取得方法）
+- プレイリスト・ファイル選択 → 非同期取得・モーダル直列化・ドラッグ&ドロップ
+- Windows でコンソールウィンドウが開く問題 → `applyOSProcAttr` を **すべての** `exec.Command` に適用
 
-### Embedded assets (`embed.go`, `embedded/`)
+### 4. テストドリブン
 
-`embed.go` embeds `all:embedded` into the binary. In release builds, CI downloads platform-specific ffmpeg binaries into `embedded/` before `wails build` runs, so ffmpeg ships inside the `.app`/`.exe`. The `embedded/ffmpeg` and `embedded/ffmpeg.exe` files are gitignored.
+可能な範囲でテスト先行を心がける。
 
-## Download implementation — design decisions and known pitfalls
+- 純粋関数（`sanitizeFilename` / `uniqueDest` / `parseYtDlpLine` など）は Go の標準テスト（`*_test.go`）で先にケースを書いてから実装・修正する
+- 外部プロセス（yt-dlp / ffmpeg）に依存する箇所はモックではなく、振る舞いの境界を絞った関数を切り出してテスト可能にする
+- フロントエンドの UI 変更は手動確認になるが、変更前後で挙動が変わる経路（成功・失敗・キャンセル・並行登録など）を必ず動かしてから完了報告する
 
-### ファイル名に `(1)` が付く問題（繰り返し発生）
+### 5. デグレ防止
 
-**絶対にやってはいけないこと:**
+過去に直した不具合の再発はユーザーが強く嫌う。再発を疑わせる変更（特にダウンロード処理・ファイル名処理）を入れる前に:
 
-1. `-o "%(title)s.%(ext)s"` を使うな。タイトル名で仮ファイルを作ると、outputDir に同名ファイルがある場合に yt-dlp が `(1)` を自動付与する。
-2. `-P home:outputDir` を使うな。yt-dlp が最終ファイルを outputDir に直接書こうとするため、outputDir の既存ファイルと競合すると `(1)` が付く。
-3. `uniqueDest` を削除するな。ユーザーの既存ファイルを黙って上書き・破壊する厳禁の変更。`uniqueDest` は outputDir に同名ファイルが**実際に存在する**場合にのみ連番を付与する正当な重複回避機構。
-4. タイトル取得に `--print "%(title)s"` を使うな。`--print` は出力テンプレート評価を経るため、yt-dlp が内部で同一 ID を 2 回処理すると `title` に ` (1)` が付加される。
+1. `docs/design.md` の該当節を読む
+2. 変更が既存ルールに反していないか自問する
+3. 反する場合は理由を明示してドキュメント側を先に更新する
 
-**正しいタイトル取得方法（STEP2a）:**
+「コードだけ直してドキュメントは後で」は禁止。ドキュメントの記述とコードの実態が乖離した瞬間にデグレリスクが立ち上がる。
 
-```
-yt-dlp --skip-download --dump-json --no-playlist URL
-```
+## コミュニケーション
 
-返ってきた JSON の `id` フィールドが `-1` で終わり、かつ `title` が ` (1)` で終わる場合は yt-dlp の内部 dedup アーティファクト。両方マッチした場合のみ ` (1)` を除去する。実際のタイトルに ` (1)` が含まれる場合は `id` が `-1` で終わらないため誤除去は起きない。
-
-**正しいダウンロード設計（STEP2〜5）:**
-
-```
-yt-dlp -o "<crypto/rand 8バイト hex>.%(ext)s"   ← 衝突ゼロの仮ファイル名
-       -P home:workDir                           ← outputDir を一切見ない
-       -P temp:workDir
-       bestvideo+bestaudio/best
-       --merge-output-format mp4
-```
-
-yt-dlp 完了後:
-1. STEP2a で取得済みのタイトルを使用（info.json は不要）
-2. `workDir/tmpBase.mp4` → `os.Rename` で `uniqueDest(outputDir, title.mp4)` へ移動
-
-### Release (`github/workflows/release.yml`)
-
-Triggered by `v*` tags. Two parallel jobs:
-1. `build-macos` — runs on `macos-latest`, downloads arm64+amd64 ffmpeg from `yt-dlp/FFmpeg-Builds`, combines with `lipo` into a universal binary, builds `darwin/universal`, zips the `.app`.
-2. `build-windows` — runs on `windows-latest`, downloads `win64-gpl` ffmpeg zip, extracts `ffmpeg.exe`, builds `windows/amd64`.
-
-Both upload artifacts to a `release` job that creates the GitHub Release.
+- ユーザーへの応答は日本語で簡潔に
+- ファイル参照はクリック可能な形式（`[name](path)` または `[name](path#L42)`）を使う
+- 変更したファイルと意図を末尾でまとめる
