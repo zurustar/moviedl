@@ -14,16 +14,9 @@ YouTube など 1000 以上のサイトから動画をダウンロードできる
 
 ## ダウンロード
 
-[Releases](../../releases) ページから最新版を入手してください。
+**Windows**: [Releases](../../releases) ページから `moviedl-windows.zip` を入手してください。
 
-| プラットフォーム | ファイル |
-|---|---|
-| macOS (Apple Silicon / Intel) | `moviedl-macos.zip` |
-| Windows 64bit | `moviedl-windows.zip` |
-
-### macOS の注意
-
-初回起動時に「開発元を確認できない」と表示される場合は、Finder で右クリック →「開く」を選択してください。
+**macOS**: リリースバイナリはコード署名されていないため、Gatekeeper にマルウェアと判定されて実行できない場合があります。**ローカルビルドを推奨します**（後述の「ビルド方法」を参照）。
 
 ## 使い方
 
@@ -37,17 +30,23 @@ YouTube など 1000 以上のサイトから動画をダウンロードできる
 
 ## ビルド方法
 
-Go 1.22 以上と [Wails v2](https://wails.io) が必要です。
+Go 1.22 以上と [Wails v2](https://wails.io) が必要です。macOS ユーザーはこちらでビルドしてください。
 
 ```bash
-go install github.com/wailsapp/wails/v2/cmd/wails@latest
-wails build
+# 1. Wails のインストール（初回のみ）
+make install-wails
+
+# 2. ビルド → build/bin/moviedl
+make build
 ```
 
-リリース用ユニバーサルバイナリ（macOS）:
+その他のターゲット:
 
 ```bash
-wails build -platform darwin/universal
+make build-universal  # macOS ユニバーサルバイナリ（arm64 + amd64）
+make dev              # 開発モード（ホットリロード付き）
+make test             # テスト実行
+make help             # ターゲット一覧
 ```
 
-> リリースビルドは GitHub Actions が自動で行います。`v*` タグを push するだけで Mac / Windows 向けバイナリが作成されます。
+詳細なビルド手順・CI・リポジトリ構成は [CONTRIBUTING.md](CONTRIBUTING.md) を参照してください。
