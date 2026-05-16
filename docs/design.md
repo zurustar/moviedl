@@ -98,6 +98,47 @@ items の中に Status == "queued" のものが存在する
 
 1. Status を最終状態（`"finished"` / `"error"` / `"cancelled"`）に更新する
 2. `schedCh` に通知する（`"downloading"` が 0 件になった場合、scheduler が次を自動起動）
+3. リストからの自動削除は **成功 (`finished`) と キャンセル (`cancelled`) のみ**。エラー (`error`) はリストに残す
+
+### エラー終了したアイテムの扱い
+
+**やってはいけないこと:**
+
+- エラー終了時に `a.removeItem` を呼んでリストから消す
+- フロントエンドの `download:update` ハンドラーで `error` を terminal 扱いして DOM から消す
+
+**理由:** エラーはディスクフル・一時的なネットワーク障害など、ユーザーの対処で復旧可能なケースが多い。自動消去すると原因表示も失われ、ユーザーが何が起きたか分からなくなる。過去の不具合再発防止のためここに固定する。
+
+**正しい設計:**
+
+- `runDownload` の最終段は `if item.Status != "error" { a.removeItem(item.ID) }`
+- フロントエンドの terminal 判定は `finished` と `cancelled` のみ。`error` はそのまま `downloads[item.id]` に残す
+- エラーアイテムには「リトライ」「削除」の 2 つのアクションボタンを表示する
+
+### リトライ（RetryDownload）
+
+エラー状態のアイテムを再実行するための API:
+
+```go
+func (a *App) RetryDownload(id string)
+```
+
+1. `items` から該当アイテムを探す（Status が `"error"` であること）
+2. Status を `"queued"` に戻し、`Error` / `Percent` / `Speed` / `ETA` / `Elapsed` / `cancelFlag` をクリアする
+3. `emit` でフロントエンドに通知し、`notify()` で scheduler を起こす（実行中が 0 件なら自動補充される）
+
+`item.cmd` は新しい `runDownload` の冒頭で上書きされるのでクリア不要。`workDir` は前回の `runDownload` の defer で削除済みなので、新しい workDir が `runDownload` 内で作られる。
+
+### エラーアイテムの削除（CancelDownload の拡張）
+
+「×」ボタン押下時の `CancelDownload(id)` は以下の状態を扱う:
+
+| 元の Status | 動作 |
+|---|---|
+| `"queued"` | Status を `"cancelled"` にして即削除 |
+| `"paused"` | プロセスを Kill → Status を `"cancelled"` → 削除 |
+| `"downloading"` | プロセスを Kill（goroutine 終了時に削除される） |
+| `"error"` | Status を `"cancelled"` にして即削除（ユーザーによる明示的な dismiss） |
 
 ---
 

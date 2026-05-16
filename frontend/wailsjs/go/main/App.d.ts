@@ -22,6 +22,8 @@ export function PauseDownload(arg1:string):Promise<void>;
 
 export function ResumeDownload(arg1:string):Promise<void>;
 
+export function RetryDownload(arg1:string):Promise<void>;
+
 export function SelectDirectory():Promise<string>;
 
 export function StartDownload(arg1:string):Promise<void>;

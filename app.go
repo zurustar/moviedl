@@ -471,7 +471,7 @@ func (a *App) CancelDownload(id string) {
 		item.cmd.Process.Kill() //nolint:errcheck
 	}
 
-	if item.Status == "queued" || item.Status == "paused" {
+	if item.Status == "queued" || item.Status == "paused" || item.Status == "error" {
 		item.Status = "cancelled"
 		a.emit(item)
 		a.removeItem(item.ID)
@@ -731,7 +731,40 @@ func (a *App) runDownload(item *DownloadItem) {
 		logDirContents(lf, "outputDir after download", item.outputDir)
 	}
 	a.emit(item)
-	a.removeItem(item.ID)
+	// エラー終了したアイテムはリストに残す（ユーザーがリトライまたは明示的に削除できるように）。
+	// 詳細は docs/design.md「エラー終了したアイテムの扱い」を参照。
+	if item.Status != "error" {
+		a.removeItem(item.ID)
+	}
+}
+
+// RetryDownload はエラー終了したアイテムを再キューする。
+// docs/design.md「リトライ（RetryDownload）」を参照。
+func (a *App) RetryDownload(id string) {
+	a.mu.Lock()
+	var item *DownloadItem
+	for _, it := range a.items {
+		if it.ID == id && it.Status == "error" {
+			item = it
+			break
+		}
+	}
+	if item != nil {
+		item.Status = "queued"
+		item.Error = ""
+		item.Percent = 0
+		item.Speed = ""
+		item.ETA = ""
+		item.Elapsed = ""
+		item.TotalSize = ""
+		atomic.StoreInt32(&item.cancelFlag, 0)
+	}
+	a.mu.Unlock()
+	if item == nil {
+		return
+	}
+	a.emit(item)
+	a.notify()
 }
 
 func workDirRegistryPath() (string, error) {

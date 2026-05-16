@@ -462,6 +462,10 @@
       await window.go.main.App.CancelDownload(id);
     }
 
+    async function retryDownload(id) {
+      await window.go.main.App.RetryDownload(id);
+    }
+
     async function installYtDlp() {
       const btn = document.getElementById('install-btn');
       btn.textContent = 'インストール中…';
@@ -521,6 +525,11 @@
             <button class="ghost start" onclick="resumeDownload('${esc(d.id)}')" title="再開">▶</button>
             <button class="ghost cancel" onclick="cancelDownload('${esc(d.id)}')" title="キャンセル">×</button>
           `;
+        } else if (d.status === 'error') {
+          actions = `
+            <button class="ghost start" onclick="retryDownload('${esc(d.id)}')" title="リトライ">⟳</button>
+            <button class="ghost cancel" onclick="cancelDownload('${esc(d.id)}')" title="リストから削除">×</button>
+          `;
         }
 
         // status text
@@ -569,7 +578,9 @@
     }
 
     window.runtime.EventsOn('download:update', item => {
-      const terminal = item.status === 'finished' || item.status === 'cancelled' || item.status === 'error';
+      // error はリストに残してユーザーがリトライ・削除できるようにする。
+      // 自動削除は finished / cancelled のみ。詳細は docs/requirements.md「エラー時の挙動」。
+      const terminal = item.status === 'finished' || item.status === 'cancelled';
       if (terminal) {
         delete downloads[item.id];
         const idx = downloadOrder.indexOf(item.id);
