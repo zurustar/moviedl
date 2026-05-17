@@ -3,4 +3,5 @@ embedded/ffmpeg
 embedded/ffmpeg.exe
 .DS_Store
 *.swp
+.serena
 moviedl
