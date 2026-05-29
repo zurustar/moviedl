@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bufio"
 	"context"
 	"crypto/rand"
@@ -95,7 +96,6 @@ func (a *App) GetMaxConcurrent() int {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-	a.extractEmbeddedFfmpeg() //nolint:errcheck
 	truncateLog()
 	cleanupLeftoverWorkDirs()
 	go a.scheduler()
@@ -265,36 +265,131 @@ func ffmpegPath() string {
 	return ""
 }
 
-func (a *App) extractEmbeddedFfmpeg() error {
-	embeddedName := "embedded/ffmpeg"
-	if goruntime.GOOS == "windows" {
-		embeddedName = "embedded/ffmpeg.exe"
-	}
-	data, err := embeddedFS.ReadFile(embeddedName)
-	if err != nil {
-		return nil
-	}
-	dest, err := ffmpegManagedPath()
-	if err != nil {
-		return err
-	}
-	if info, err := os.Stat(dest); err == nil && info.Size() == int64(len(data)) {
-		return nil
-	}
-	return os.WriteFile(dest, data, 0o755)
-}
-
 func (a *App) CheckFfmpeg() bool { return ffmpegPath() != "" }
+
+// CanInstallFfmpeg はアプリ内 ffmpeg インストールに対応しているか返す（Windows のみ）。
+func (a *App) CanInstallFfmpeg() bool { return goruntime.GOOS == "windows" }
 
 func (a *App) FfmpegInstallHint() string {
 	switch goruntime.GOOS {
 	case "darwin":
 		return "ffmpeg が見つかりません。高画質ダウンロードには brew install ffmpeg が必要です。"
 	case "windows":
-		return "ffmpeg が見つかりません。リリース版バイナリには ffmpeg が同梱されています。"
+		return "ffmpeg が見つかりません。高画質ダウンロードにはインストールが必要です。"
 	default:
 		return "ffmpeg が見つかりません。パッケージマネージャーで ffmpeg をインストールしてください。"
 	}
+}
+
+// InstallFfmpeg は Windows 向けに ffmpeg を取得して設定フォルダへ配置する。
+// FFmpeg-Builds の win64-gpl zip を取得し、checksums.sha256 と照合してから
+// zip 内の bin/ffmpeg.exe を原子的に配置する。詳細は docs/design.md「Windows ffmpeg の取得」参照。
+func (a *App) InstallFfmpeg() error {
+	if goruntime.GOOS != "windows" {
+		return fmt.Errorf("このプラットフォームではアプリ内インストールに対応していません")
+	}
+	dest, err := ffmpegManagedPath()
+	if err != nil {
+		return err
+	}
+	const base = "https://github.com/yt-dlp/FFmpeg-Builds/releases/latest/download/"
+	const asset = "ffmpeg-master-latest-win64-gpl.zip"
+	client := &http.Client{Timeout: 15 * time.Minute}
+
+	// 期待ダイジェストを先に取得（checksums.sha256 は <hex>␣␣<filename> 形式）。
+	wantSum, err := fetchExpectedSum(client, base+"checksums.sha256", asset)
+	if err != nil {
+		return err
+	}
+
+	// zip を一時ファイルへストリーム保存しつつ SHA256 を計算する。
+	resp, err := client.Get(base + asset)
+	if err != nil {
+		return fmt.Errorf("ダウンロード失敗: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ダウンロード失敗: HTTP %d", resp.StatusCode)
+	}
+
+	dir := filepath.Dir(dest)
+	zipTmp, err := os.CreateTemp(dir, "ffmpeg-zip-*")
+	if err != nil {
+		return fmt.Errorf("一時ファイル作成失敗: %w", err)
+	}
+	zipName := zipTmp.Name()
+	defer os.Remove(zipName) //nolint:errcheck
+
+	h := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(zipTmp, h), resp.Body); err != nil {
+		zipTmp.Close() //nolint:errcheck
+		return fmt.Errorf("書き込み失敗: %w", err)
+	}
+	if err := zipTmp.Close(); err != nil {
+		return err
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, wantSum) {
+		return fmt.Errorf("チェックサム不一致（破損または改竄の可能性）: want=%s got=%s", wantSum, got)
+	}
+
+	// zip から bin/ffmpeg.exe を取り出して dest へ原子的に配置する。
+	zr, err := zip.OpenReader(zipName)
+	if err != nil {
+		return fmt.Errorf("zip を開けません: %w", err)
+	}
+	defer zr.Close()
+	names := make([]string, len(zr.File))
+	for i, f := range zr.File {
+		names[i] = f.Name
+	}
+	entry, err := ffmpegZipEntry(names)
+	if err != nil {
+		return err
+	}
+	var zf *zip.File
+	for _, f := range zr.File {
+		if f.Name == entry {
+			zf = f
+			break
+		}
+	}
+	rc, err := zf.Open()
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+
+	exeTmp, err := os.CreateTemp(dir, "ffmpeg-exe-*")
+	if err != nil {
+		return err
+	}
+	exeName := exeTmp.Name()
+	defer os.Remove(exeName)                       //nolint:errcheck
+	if _, err := io.Copy(exeTmp, rc); err != nil { //nolint:gosec // 取得元・SHA 照合済み
+		exeTmp.Close() //nolint:errcheck
+		return fmt.Errorf("展開失敗: %w", err)
+	}
+	if err := exeTmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(exeName, 0o755); err != nil {
+		return err
+	}
+	if err := os.Rename(exeName, dest); err != nil {
+		return fmt.Errorf("配置失敗: %w", err)
+	}
+	return nil
+}
+
+// ffmpegZipEntry は zip エントリ名一覧から basename が ffmpeg.exe のエントリを返す。
+func ffmpegZipEntry(names []string) (string, error) {
+	for _, n := range names {
+		parts := strings.Split(n, "/")
+		if parts[len(parts)-1] == "ffmpeg.exe" {
+			return n, nil
+		}
+	}
+	return "", fmt.Errorf("zip 内に ffmpeg.exe が見つかりません")
 }
 
 func (a *App) CheckYtDlp() bool {

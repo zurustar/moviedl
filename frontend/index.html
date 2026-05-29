@@ -258,6 +258,7 @@
 
   <div id="ffmpeg-banner" class="banner">
     <span id="ffmpeg-msg"></span>
+    <button id="ffmpeg-install-btn" onclick="installFfmpeg()" style="display:none">インストール</button>
   </div>
 
   <div class="card">
@@ -330,8 +331,14 @@
 
         const hasFfmpeg = await window.go.main.App.CheckFfmpeg();
         if (!hasFfmpeg) {
+          const canInstall = await window.go.main.App.CanInstallFfmpeg();
           document.getElementById('ffmpeg-msg').textContent =
-            await window.go.main.App.FfmpegInstallHint();
+            canInstall
+              ? 'ffmpeg が見つかりません。高画質ダウンロードにはインストールが必要です。'
+              : await window.go.main.App.FfmpegInstallHint();
+          if (canInstall) {
+            document.getElementById('ffmpeg-install-btn').style.display = '';
+          }
           document.getElementById('ffmpeg-banner').style.display = 'flex';
         }
 
@@ -511,6 +518,20 @@
         btn.textContent = 'リトライ';
         btn.disabled = false;
         alert('インストール失敗: ' + e);
+      }
+    }
+
+    async function installFfmpeg() {
+      const btn = document.getElementById('ffmpeg-install-btn');
+      btn.textContent = 'インストール中…';
+      btn.disabled = true;
+      try {
+        await window.go.main.App.InstallFfmpeg();
+        document.getElementById('ffmpeg-banner').style.display = 'none';
+      } catch (e) {
+        btn.textContent = 'リトライ';
+        btn.disabled = false;
+        alert('ffmpeg インストール失敗: ' + e);
       }
     }
 
