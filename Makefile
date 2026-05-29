@@ -1,5 +1,6 @@
 WAILS := $(shell which wails 2>/dev/null || echo ~/go/bin/wails)
-STATICCHECK := honnef.co/go/tools/cmd/staticcheck@latest
+# Go 1.25 に合わせて固定（v0.7.0 は go 1.25.0 が必要）。go.mod の Go を上げる際は併せて見直す。
+STATICCHECK := honnef.co/go/tools/cmd/staticcheck@v0.7.0
 
 .PHONY: help dev build build-universal build-windows test check fmt fmtcheck vet staticcheck install-hooks install-wails
 

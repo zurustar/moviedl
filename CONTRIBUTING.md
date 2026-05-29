@@ -4,7 +4,7 @@ moviedl の開発環境セットアップとビルド方法、リポジトリ構
 
 ## 必要なもの
 
-- Go 1.22 以上
+- Go 1.25 以上
 - [Wails v2](https://wails.io) (`go install github.com/wailsapp/wails/v2/cmd/wails@latest`)
 - macOS / Linux の場合: Xcode Command Line Tools / WebKitGTK
 - ffmpeg（ローカル開発時。リリースビルドではバイナリに同梱される）

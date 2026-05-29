@@ -32,7 +32,7 @@ YouTube など 1000 以上のサイトから動画をダウンロードできる
 
 ## ビルド方法
 
-Go 1.22 以上と [Wails v2](https://wails.io) が必要です。macOS ユーザーはこちらでビルドしてください。
+Go 1.25 以上と [Wails v2](https://wails.io) が必要です。macOS ユーザーはこちらでビルドしてください。
 
 ```bash
 # 1. Wails のインストール（初回のみ）
