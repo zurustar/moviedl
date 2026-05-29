@@ -5,3 +5,4 @@ embedded/ffmpeg.exe
 *.swp
 moviedl
 .claude/settings.local.json
+.serena
