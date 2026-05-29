@@ -30,6 +30,10 @@ export function GetDefaultDir() {
   return window['go']['main']['App']['GetDefaultDir']();
 }
 
+export function GetMaxConcurrent() {
+  return window['go']['main']['App']['GetMaxConcurrent']();
+}
+
 export function InstallYtDlp() {
   return window['go']['main']['App']['InstallYtDlp']();
 }
@@ -48,6 +52,10 @@ export function RetryDownload(arg1) {
 
 export function SelectDirectory() {
   return window['go']['main']['App']['SelectDirectory']();
+}
+
+export function SetMaxConcurrent(arg1) {
+  return window['go']['main']['App']['SetMaxConcurrent'](arg1);
 }
 
 export function StartDownload(arg1) {

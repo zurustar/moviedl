@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,10 +24,11 @@ import (
 )
 
 type App struct {
-	ctx     context.Context
-	mu      sync.Mutex
-	items   []*DownloadItem
-	schedCh chan struct{}
+	ctx       context.Context
+	mu        sync.Mutex
+	items     []*DownloadItem
+	schedCh   chan struct{}
+	maxActive int // 自動補充で維持する実行中アイテム数の上限（1〜10）
 }
 
 type DownloadItem struct {
@@ -63,8 +66,31 @@ var dlCounter int64
 
 func NewApp() *App {
 	return &App{
-		schedCh: make(chan struct{}, 1),
+		schedCh:   make(chan struct{}, 1),
+		maxActive: 1,
 	}
+}
+
+// SetMaxConcurrent は自動補充で維持する実行中アイテム数の上限を設定する（1〜10 にクランプ）。
+// 設定後に scheduler を起こし、引き上げ時は待ちキューから即座に補充させる。
+func (a *App) SetMaxConcurrent(n int) {
+	if n < 1 {
+		n = 1
+	}
+	if n > 10 {
+		n = 10
+	}
+	a.mu.Lock()
+	a.maxActive = n
+	a.mu.Unlock()
+	a.notify()
+}
+
+// GetMaxConcurrent は現在の同時ダウンロード数上限を返す（フロントエンドの初期値用）。
+func (a *App) GetMaxConcurrent() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.maxActive
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -94,36 +120,45 @@ func (a *App) notify() {
 	}
 }
 
-// scheduler auto-starts one item from the queue whenever the active list is empty.
+// scheduler auto-starts queued items until the active count reaches maxActive.
 func (a *App) scheduler() {
 	for range a.schedCh {
 		a.mu.Lock()
-		var hasActive bool
-		for _, it := range a.items {
-			if it.Status == "downloading" {
-				hasActive = true
-				break
-			}
-		}
-		var next *DownloadItem
-		if !hasActive {
-			for _, it := range a.items {
-				if it.Status == "queued" {
-					next = it
-					break
-				}
-			}
-			if next != nil {
-				next.Status = "downloading"
-			}
+		toStart := selectToStart(a.items, a.maxActive)
+		for _, it := range toStart {
+			it.Status = "downloading"
 		}
 		a.mu.Unlock()
 
-		if next != nil {
-			a.emit(next)
-			go a.runDownload(next)
+		// ロックを解放してから起動する（runDownload も mu を取るため）。
+		for _, it := range toStart {
+			a.emit(it)
+			go a.runDownload(it)
 		}
 	}
+}
+
+// selectToStart は items のうち、実行中件数が maxActive に達するまで先頭から
+// 起動すべき "queued" アイテムを返す。状態は変更しない（呼び出し側の責務）。
+// docs/design.md「自動補充ルール（scheduler）」を参照。
+func selectToStart(items []*DownloadItem, maxActive int) []*DownloadItem {
+	active := 0
+	for _, it := range items {
+		if it.Status == "downloading" {
+			active++
+		}
+	}
+	var out []*DownloadItem
+	for _, it := range items {
+		if active >= maxActive {
+			break
+		}
+		if it.Status == "queued" {
+			out = append(out, it)
+			active++
+		}
+	}
+	return out
 }
 
 func (a *App) emit(item *DownloadItem) {
@@ -271,32 +306,111 @@ func (a *App) CheckYtDlp() bool {
 	return err == nil && info.Size() > 0
 }
 
+// InstallYtDlp は yt-dlp を GitHub Releases から取得して配置する。
+// SHA2-256SUMS の期待値とダウンロード実体の SHA256 を照合し、一致した場合のみ
+// 最終パスへ原子的に配置する。詳細は docs/design.md「インストール時の完全性検証」を参照。
 func (a *App) InstallYtDlp() error {
 	path, err := a.ytDlpPath()
 	if err != nil {
 		return err
 	}
-	var dlURL string
+	var assetName string
 	switch goruntime.GOOS {
 	case "darwin":
-		dlURL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
+		assetName = "yt-dlp_macos"
 	case "windows":
-		dlURL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+		assetName = "yt-dlp.exe"
 	default:
-		dlURL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
+		assetName = "yt-dlp"
 	}
-	resp, err := http.Get(dlURL) //nolint:noctx
+	const base = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/"
+
+	client := &http.Client{Timeout: 5 * time.Minute}
+
+	// 期待ダイジェストを先に取得する
+	wantSum, err := fetchExpectedSum(client, base+"SHA2-256SUMS", assetName)
+	if err != nil {
+		return err
+	}
+
+	// バイナリを一時ファイルへストリーム保存しつつ SHA256 を計算する
+	resp, err := client.Get(base + assetName)
 	if err != nil {
 		return fmt.Errorf("ダウンロード失敗: %w", err)
 	}
 	defer resp.Body.Close()
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
-	if err != nil {
-		return fmt.Errorf("ファイル作成失敗: %w", err)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ダウンロード失敗: HTTP %d", resp.StatusCode)
 	}
-	defer f.Close()
-	_, err = io.Copy(f, resp.Body)
-	return err
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), "yt-dlp-dl-*")
+	if err != nil {
+		return fmt.Errorf("一時ファイル作成失敗: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) //nolint:errcheck // rename 成功後は no-op、失敗時は掃除
+
+	h := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(tmp, h), resp.Body); err != nil {
+		tmp.Close() //nolint:errcheck
+		return fmt.Errorf("書き込み失敗: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	// 検証前の実体を最終パスに置かない: 一致を確認してから rename する
+	gotSum := hex.EncodeToString(h.Sum(nil))
+	if !strings.EqualFold(gotSum, wantSum) {
+		return fmt.Errorf("チェックサム不一致（破損または改竄の可能性）: want=%s got=%s", wantSum, gotSum)
+	}
+
+	if err := os.Chmod(tmpName, 0o755); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("配置失敗: %w", err)
+	}
+	return nil
+}
+
+// fetchExpectedSum は SHA2-256SUMS を取得し、assetName 行の期待ダイジェストを返す。
+func fetchExpectedSum(client *http.Client, url, assetName string) (string, error) {
+	resp, err := client.Get(url)
+	if err != nil {
+		return "", fmt.Errorf("SHA2-256SUMS 取得失敗: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("SHA2-256SUMS 取得失敗: HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", err
+	}
+	return parseSums(data, assetName)
+}
+
+// parseSums は SHA2-256SUMS の内容から assetName 行（"<hexdigest>  <filename>"）の
+// 期待ダイジェストを返す。見つからなければエラー。
+func parseSums(data []byte, assetName string) (string, error) {
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[1] == assetName {
+			return fields[0], nil
+		}
+	}
+	return "", fmt.Errorf("SHA2-256SUMS に %s のエントリがありません", assetName)
+}
+
+// stripDedupSuffix は yt-dlp の内部 dedup アーティファクト（id が "-1" で終わり
+// title が " (1)" で終わる）を検出し、付加された末尾の " (1)" を除去する。
+// それ以外は title をそのまま返す。docs/design.md「(1) サフィックス問題」を参照。
+func stripDedupSuffix(id, title string) string {
+	if strings.HasSuffix(id, "-1") && strings.HasSuffix(title, " (1)") {
+		return strings.TrimSuffix(title, " (1)")
+	}
+	return title
 }
 
 // FetchPlaylist fetches video entries from a URL.
@@ -306,10 +420,13 @@ func (a *App) FetchPlaylist(rawURL string) ([]PlaylistEntry, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !isValidURL(rawURL) {
+		return nil, fmt.Errorf("不正な URL です（http:// または https:// で始まる必要があります）")
+	}
 	cmd := exec.Command(ytdlp,
 		"--flat-playlist", "--dump-json",
 		"--no-warnings",
-		rawURL,
+		"--", rawURL,
 	)
 	cmd.Env = append(os.Environ(), "PYTHONUTF8=1", "PYTHONIOENCODING=utf-8")
 	applyOSProcAttr(cmd)
@@ -318,7 +435,13 @@ func (a *App) FetchPlaylist(rawURL string) ([]PlaylistEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("情報取得失敗: %w", err)
 	}
+	return parsePlaylistJSON(out)
+}
 
+// parsePlaylistJSON は yt-dlp --dump-json の出力（1 行 1 JSON）を解析する。
+// webpage_url を優先し無ければ url を採用、URL 無し行とパース不能行はスキップする。
+// 有効エントリが 0 件ならエラーを返す。docs/design.md「プレイリスト・ファイル選択」参照。
+func parsePlaylistJSON(out []byte) ([]PlaylistEntry, error) {
 	type rawEntry struct {
 		ID         string  `json:"id"`
 		URL        string  `json:"url"`
@@ -359,8 +482,24 @@ func (a *App) FetchPlaylist(rawURL string) ([]PlaylistEntry, error) {
 	return entries, nil
 }
 
+// isValidURL は yt-dlp に渡してよい URL かを判定する。
+// http:// または https:// で始まることを要求し、引数インジェクション
+// （URL が "-" 始まりで yt-dlp のオプションに化ける）を入口で防ぐ。
+// 詳細は docs/design.md「引数インジェクション対策」を参照。
+func isValidURL(raw string) bool {
+	u, err := neturl.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
 // AddToQueue registers a URL as a queued item and notifies the scheduler.
+// 不正な URL（http/https 以外）は空文字を返して登録を拒否する。
 func (a *App) AddToQueue(url, outputDir string) string {
+	if !isValidURL(url) {
+		return ""
+	}
 	id := fmt.Sprintf("%d", atomic.AddInt64(&dlCounter, 1))
 	item := &DownloadItem{
 		ID:        id,
@@ -577,7 +716,7 @@ func (a *App) runDownload(item *DownloadItem) {
 	ytdlpEnv := append(os.Environ(), "PYTHONUTF8=1", "PYTHONIOENCODING=utf-8")
 	{
 		var titleStderr strings.Builder
-		titleCmd := exec.Command(ytdlp, "--skip-download", "--dump-json", "--no-playlist", item.URL)
+		titleCmd := exec.Command(ytdlp, "--skip-download", "--dump-json", "--no-playlist", "--", item.URL)
 		titleCmd.Dir = workDir
 		titleCmd.Env = ytdlpEnv
 		titleCmd.Stderr = &titleStderr
@@ -590,9 +729,8 @@ func (a *App) runDownload(item *DownloadItem) {
 				Title string `json:"title"`
 			}
 			if jerr := json.Unmarshal([]byte(firstLine), &dumpInfo); jerr == nil && dumpInfo.Title != "" {
-				title := dumpInfo.Title
-				if strings.HasSuffix(dumpInfo.ID, "-1") && strings.HasSuffix(title, " (1)") {
-					title = strings.TrimSuffix(title, " (1)")
+				title := stripDedupSuffix(dumpInfo.ID, dumpInfo.Title)
+				if title != dumpInfo.Title {
 					logf("[STEP2a] dedup suffix stripped (raw id=%q)", dumpInfo.ID)
 				}
 				item.Title = title
@@ -623,7 +761,7 @@ func (a *App) runDownload(item *DownloadItem) {
 		args = append(args, "-f", "best[ext=mp4]/best")
 		logf("[STEP2] ffmpeg not found, using single-format fallback")
 	}
-	args = append(args, item.URL)
+	args = append(args, "--", item.URL)
 	logf("[STEP2] command: %s %s", ytdlp, strings.Join(args, " "))
 
 	cmd := exec.Command(ytdlp, args...)
@@ -830,23 +968,6 @@ func sanitizeFilename(s string) string {
 	r := strings.NewReplacer(`\`, "_", `/`, "_", `:`, "_", `*`, "_", `?`, "_", `"`, "_", `<`, "_", `>`, "_", `|`, "_")
 	s = r.Replace(s)
 	return strings.TrimRight(strings.TrimSpace(s), ". ")
-}
-
-func moveToOutputDir(workDir, outputDir string) error {
-	entries, err := os.ReadDir(workDir)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		dst := uniqueDest(outputDir, e.Name())
-		if err := os.Rename(filepath.Join(workDir, e.Name()), dst); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func uniqueDest(dir, name string) string {
