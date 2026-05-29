@@ -4,3 +4,4 @@ embedded/ffmpeg.exe
 .DS_Store
 *.swp
 moviedl
+.claude/settings.local.json

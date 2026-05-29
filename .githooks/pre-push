@@ -1,0 +1,12 @@
+#!/bin/sh
+# PR を出す前のローカルゲート。push 時に make check を実行する。
+# 有効化: make install-hooks（git config core.hooksPath .githooks）
+# 緊急回避: git push --no-verify（原則使わない）
+
+echo "pre-push: make check を実行します..."
+if ! make check; then
+	echo ""
+	echo "pre-push: チェックに失敗したため push を中断しました。"
+	echo "          修正後に再度 push してください（make fmt で整形できます）。"
+	exit 1
+fi

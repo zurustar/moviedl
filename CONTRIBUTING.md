@@ -28,6 +28,34 @@ moviedl の開発環境セットアップとビルド方法、リポジトリ構
 `wails build` が `frontend/wailsjs/` のバインディングを自動再生成します。手動編集しないでください。
 出力は `build/bin/` に置かれます。
 
+## チェック（PR を出す前に必須）
+
+PR を出す前にローカルで以下を必ず通すこと。CI（後述）でも同じチェックが走るが、**手元で先に通すのが原則**。
+
+```bash
+make check        # gofmt 検査 + go vet + staticcheck + go test を一括実行
+make fmt          # gofmt -w でフォーマットを自動修正
+```
+
+`make check` の内訳:
+
+| ステップ | 内容 | 落ちる例 |
+|---|---|---|
+| gofmt | 未整形ファイルがあれば失敗（`make fmt` で修正） | インデント・整形崩れ |
+| `go vet ./...` | 標準の静的解析 | `Printf` の書式ミス等 |
+| `staticcheck ./...` | より広い静的解析（`go run` で都度取得） | 未使用関数（`U1000`）= デッドコード検出 |
+| `go test ./...` | 全ユニットテスト | ロジックの回帰 |
+
+### コミット前/プッシュ前フック
+
+`make check` を **push 前に自動実行**する git フックを同梱している。各自一度だけ有効化する:
+
+```bash
+make install-hooks   # git config core.hooksPath .githooks を設定
+```
+
+フック実体は [.githooks/pre-push](.githooks/pre-push)（バージョン管理対象）。チェックが落ちると push が中断される。緊急時のみ `git push --no-verify` で回避できるが、原則使わないこと。
+
 ## リポジトリ構成
 
 ```
@@ -38,10 +66,15 @@ moviedl/
 ├── sysproc_*.go        プロセスサスペンド・コンソール非表示のプラットフォーム別実装
 ├── frontend/index.html 単一ファイルのフロントエンド（フレームワーク・ビルドステップなし）
 ├── embedded/           リリースビルド時に ffmpeg バイナリが配置される（gitignore 対象）
+├── *_test.go           ユニットテスト（純粋関数中心）
+├── Makefile            build / check / fmt / install-hooks などのタスク
+├── .githooks/pre-push  push 前に make check を走らせるフック（install-hooks で有効化）
 ├── docs/
 │   ├── requirements.md 要件定義（ユーザー視点での仕様）
 │   └── design.md       設計書（実装上の意思決定とピットフォール）
-└── .github/workflows/release.yml  v* タグ push でビルドする CI
+└── .github/workflows/
+    ├── ci.yml          push / PR で make check を実行する CI
+    └── release.yml     v* タグ push でビルドする CI
 ```
 
 ## アーキテクチャ概要
