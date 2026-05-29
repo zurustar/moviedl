@@ -12,11 +12,14 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      # staticcheck@latest が最新の Go を要求するため、go.mod の最小バージョン
+      # （1.22）ではなく stable を使う。ビルド/テストは後方互換なので問題ない。
+      # リリースビルド（release.yml）は再現性のため go.mod 固定のまま。
+      - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: stable
 
       # gofmt + go vet + staticcheck + go test（ローカルの make check と同一）
       - name: make check
