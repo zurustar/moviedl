@@ -48,13 +48,6 @@ jobs:
       - name: Install Wails
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
 
-      - name: Embed ffmpeg (Windows amd64)
-        shell: bash
-        run: |
-          curl -L https://github.com/yt-dlp/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip -o ffmpeg.zip
-          unzip ffmpeg.zip "*/bin/ffmpeg.exe" -d ffmpeg_extract
-          find ffmpeg_extract -name ffmpeg.exe | head -1 | xargs -I{} cp {} embedded/ffmpeg.exe
-
       - name: Build
         shell: bash
         run: |

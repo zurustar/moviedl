@@ -6,6 +6,10 @@ export function AddToQueue(arg1, arg2) {
   return window['go']['main']['App']['AddToQueue'](arg1, arg2);
 }
 
+export function CanInstallFfmpeg() {
+  return window['go']['main']['App']['CanInstallFfmpeg']();
+}
+
 export function CancelDownload(arg1) {
   return window['go']['main']['App']['CancelDownload'](arg1);
 }
@@ -32,6 +36,10 @@ export function GetDefaultDir() {
 
 export function GetMaxConcurrent() {
   return window['go']['main']['App']['GetMaxConcurrent']();
+}
+
+export function InstallFfmpeg() {
+  return window['go']['main']['App']['InstallFfmpeg']();
 }
 
 export function InstallYtDlp() {

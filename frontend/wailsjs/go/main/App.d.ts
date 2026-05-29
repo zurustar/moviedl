@@ -4,6 +4,8 @@ import {main} from '../models';
 
 export function AddToQueue(arg1:string,arg2:string):Promise<string>;
 
+export function CanInstallFfmpeg():Promise<boolean>;
+
 export function CancelDownload(arg1:string):Promise<void>;
 
 export function CheckFfmpeg():Promise<boolean>;
@@ -17,6 +19,8 @@ export function FfmpegInstallHint():Promise<string>;
 export function GetDefaultDir():Promise<string>;
 
 export function GetMaxConcurrent():Promise<number>;
+
+export function InstallFfmpeg():Promise<void>;
 
 export function InstallYtDlp():Promise<void>;
 

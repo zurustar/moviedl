@@ -52,8 +52,27 @@ args = append(args, "--", item.URL) // 本ダウンロード
 
 映像・音声ストリームの結合およびリマックスに ffmpeg を使用する。
 
-- Windows: リリースバイナリに同梱（Go の `embed` で埋め込み、起動時に展開）
+- Windows: **アプリ内ダウンロード**（`InstallFfmpeg`）。`os.UserConfigDir()/moviedl/ffmpeg.exe` に配置する。yt-dlp と同じ「起動後に取得」モデル。
 - macOS: Homebrew の標準インストールパスを直接参照（macOS GUI アプリはシェルの PATH を継承しない）
+
+ffmpeg の探索順（`ffmpegPath`）: 管理パス（設定フォルダ） → `exec.LookPath` → Homebrew 既定パス。
+
+#### なぜ Windows で埋め込みをやめたか
+
+**以前**: リリースバイナリに ffmpeg.exe を `embed` で同梱し、起動時に展開していた。
+
+**問題**: 「exe の中に別の exe（PE）が丸ごと入っている」状態は Windows Defender 等のヒューリスティック誤検知（特に `!ml` 系）を強く誘発し、ビルド成果物が削除される事象が起きた。バイナリも巨大になる。
+
+**対策**: ffmpeg を埋め込まず、yt-dlp と同様にアプリ内から取得する。これにより埋め込み PE が消え、バイナリが小さく素直になる。
+**注意**: これは誤検知の一要因を除くだけで万能ではない（未署名＋ダウンローダ挙動という要因は残る）。根治は Windows コード署名。
+
+#### Windows ffmpeg の取得（InstallFfmpeg）
+
+- 取得元: `yt-dlp/FFmpeg-Builds` の `ffmpeg-master-latest-win64-gpl.zip`（GitHub Releases、HTTPS）。
+- 完全性検証: 同リリースの `checksums.sha256`（`<hex>␣␣<filename>` 形式）から対象 zip のダイジェストを取り、ダウンロードした zip の SHA256 と照合する。`InstallYtDlp` と同じ `fetchExpectedSum` / `parseSums` を流用する。不一致なら配置しない。
+- 展開: zip 内の `*/bin/ffmpeg.exe`（basename が `ffmpeg.exe` のエントリ）を `ffmpegZipEntry` で特定し、一時ファイルへ展開 → SHA 一致確認済みの実体のみ `os.Rename` で最終パスへ原子的に配置する。
+- タイムアウト付き `http.Client` を使う（zip が大きいため余裕を持たせる）。
+- アプリ内インストールは Windows のみ対応（`CanInstallFfmpeg` が `goruntime.GOOS == "windows"` を返す）。macOS は従来どおり Homebrew 案内。
 
 ### フォーマット選択
 
@@ -397,4 +416,4 @@ GitHub Actions で `v*` タグ push をトリガーに自動ビルドする。
 | build-macos | macos-latest | moviedl-macos.zip |
 | build-windows | windows-latest | moviedl-windows.zip |
 
-Windows ビルド時に ffmpeg バイナリを `embedded/` へ配置してから `wails build` を実行し、ffmpeg を同梱したシングルバイナリを生成する。
+ffmpeg はバイナリに同梱しない（Windows も含む）。両プラットフォームとも `wails build` をそのまま実行する。Windows の ffmpeg はアプリ初回起動後に `InstallFfmpeg` で取得する（上記「ffmpeg」節を参照）。
