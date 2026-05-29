@@ -16,6 +16,8 @@ export function FfmpegInstallHint():Promise<string>;
 
 export function GetDefaultDir():Promise<string>;
 
+export function GetMaxConcurrent():Promise<number>;
+
 export function InstallYtDlp():Promise<void>;
 
 export function PauseDownload(arg1:string):Promise<void>;
@@ -25,5 +27,7 @@ export function ResumeDownload(arg1:string):Promise<void>;
 export function RetryDownload(arg1:string):Promise<void>;
 
 export function SelectDirectory():Promise<string>;
+
+export function SetMaxConcurrent(arg1:number):Promise<void>;
 
 export function StartDownload(arg1:string):Promise<void>;
