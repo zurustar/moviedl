@@ -507,6 +507,23 @@
       await window.go.main.App.RetryDownload(id);
     }
 
+    // copyURL: アイテムの元 URL をクリップボードへコピーする。
+    // WebView の navigator.clipboard は不安定なため Wails ランタイムを使う。
+    async function copyURL(id, btn) {
+      const d = downloads[id];
+      if (!d || !d.url) return;
+      try {
+        await window.runtime.ClipboardSetText(d.url);
+        if (btn) {
+          const orig = btn.textContent;
+          btn.textContent = '✓';
+          setTimeout(() => { btn.textContent = orig; }, 1000);
+        }
+      } catch (e) {
+        alert('URL のコピーに失敗しました: ' + e);
+      }
+    }
+
     async function installYtDlp() {
       const btn = document.getElementById('install-btn');
       btn.textContent = 'インストール中…';
@@ -586,6 +603,10 @@
             <button class="ghost cancel" onclick="cancelDownload('${esc(d.id)}')" title="リストから削除">×</button>
           `;
         }
+
+        // どの状態でも元 URL をコピーできるようにする（リトライで直らない場合の代替DL用）。
+        // URL はエスケープ事故を避けるため id 経由で参照する。
+        actions = `<button class="ghost" onclick="copyURL('${esc(d.id)}', this)" title="URL をコピー">⧉</button>` + actions;
 
         // status text
         let segs = [];

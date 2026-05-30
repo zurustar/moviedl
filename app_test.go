@@ -117,11 +117,18 @@ func TestParseYtDlpLine(t *testing.T) {
 		}
 	})
 
-	t.Run("100%で finished", func(t *testing.T) {
+	t.Run("100%でも finished にしない（後処理が残るため）", func(t *testing.T) {
+		// 進捗 100% はダウンロード完了であって全体の成功ではない。
+		// ffmpeg 結合などの後処理が残るため、Status は進捗パースで確定させない。
+		// docs/design.md「finished は進捗 100% で決めてはならない」を参照。
 		var it DownloadItem
+		it.Status = "downloading"
 		parseYtDlpLine("[download] 100% of 5.00MiB", &it)
-		if it.Percent != 100 || it.Status != "finished" {
-			t.Errorf("got Percent=%v Status=%q, want 100/finished", it.Percent, it.Status)
+		if it.Percent != 100 {
+			t.Errorf("Percent = %v, want 100", it.Percent)
+		}
+		if it.Status == "finished" {
+			t.Errorf("Status を finished にしてはいけない（後処理失敗を握りつぶす）: %q", it.Status)
 		}
 	})
 

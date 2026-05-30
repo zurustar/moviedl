@@ -1102,9 +1102,9 @@ func parseYtDlpLine(line string, item *DownloadItem) {
 			var pct float64
 			fmt.Sscanf(strings.TrimSuffix(p, "%"), "%f", &pct)
 			item.Percent = pct
-			if pct >= 100 {
-				item.Status = "finished"
-			}
+			// 進捗 100% はダウンロード完了であって全体の成功ではない（ffmpeg 結合などの
+			// 後処理が残る）。完了の確定は runDownload の成功分岐でのみ行う。
+			// docs/design.md「finished は進捗 100% で決めてはならない」を参照。
 		}
 		if p == "of" && i+1 < len(parts) && parts[i+1] != "~" {
 			item.TotalSize = parts[i+1]
