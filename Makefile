@@ -2,6 +2,11 @@ WAILS := $(shell which wails 2>/dev/null || echo ~/go/bin/wails)
 # Go 1.25 に合わせて固定（v0.7.0 は go 1.25.0 が必要）。go.mod の Go を上げる際は併せて見直す。
 STATICCHECK := honnef.co/go/tools/cmd/staticcheck@v0.7.0
 
+# バージョン情報の埋め込み（docs/design.md「バージョン情報の埋め込み」参照）
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+BUILD_DATE := $(shell date -u +%Y-%m-%d)
+LDFLAGS := -X main.version=$(VERSION) -X main.buildDate=$(BUILD_DATE)
+
 .PHONY: help dev build build-universal build-windows test check fmt fmtcheck vet staticcheck install-hooks install-wails
 
 help:
@@ -46,13 +51,13 @@ dev:
 	$(WAILS) dev
 
 build:
-	$(WAILS) build
+	$(WAILS) build -ldflags "$(LDFLAGS)"
 
 build-universal:
-	$(WAILS) build -platform darwin/universal
+	$(WAILS) build -ldflags "$(LDFLAGS)" -platform darwin/universal
 
 build-windows:
-	$(WAILS) build -platform windows/amd64
+	$(WAILS) build -ldflags "$(LDFLAGS)" -platform windows/amd64
 
 test:
 	go test ./...

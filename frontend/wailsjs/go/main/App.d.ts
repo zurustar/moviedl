@@ -4,6 +4,8 @@ import {main} from '../models';
 
 export function AddToQueue(arg1:string,arg2:string):Promise<string>;
 
+export function AppVersion():Promise<string>;
+
 export function CanInstallFfmpeg():Promise<boolean>;
 
 export function CancelDownload(arg1:string):Promise<void>;

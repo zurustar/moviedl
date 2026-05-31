@@ -176,6 +176,25 @@ func TestParseYtDlpLine(t *testing.T) {
 	})
 }
 
+// 仕様: docs/design.md「バージョン情報の埋め込み」
+// リリースはタグをそのまま、dev のときだけビルド日を併記。
+func TestFormatVersion(t *testing.T) {
+	cases := []struct {
+		version, buildDate, want string
+	}{
+		{"v0.1.8", "2026-05-31", "v0.1.8"},        // リリース: タグのみ
+		{"v0.1.8", "", "v0.1.8"},                  // 日付なしでもタグのみ
+		{"dev", "2026-05-31", "dev (2026-05-31)"}, // dev: 日付併記
+		{"dev", "", "dev"},                        // dev で日付なし
+		{"", "", "dev"},                           // 空はフォールバックで dev
+	}
+	for _, c := range cases {
+		if got := formatVersion(c.version, c.buildDate); got != c.want {
+			t.Errorf("formatVersion(%q,%q) = %q, want %q", c.version, c.buildDate, got, c.want)
+		}
+	}
+}
+
 func TestFormatElapsed(t *testing.T) {
 	cases := []struct {
 		secs int
