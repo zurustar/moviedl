@@ -28,6 +28,8 @@ moviedl の開発環境セットアップとビルド方法、リポジトリ構
 `wails build` が `frontend/wailsjs/` のバインディングを自動再生成します。手動編集しないでください。
 出力は `build/bin/` に置かれます。
 
+`make build` はバージョン情報（`git describe` ＋ ビルド日）を `-ldflags` で埋め込みます。`wails build` を直接叩くと `version=dev` になります。リリース時は CI が git タグを注入します（[docs/design.md](docs/design.md)「バージョン情報の埋め込み」を参照）。
+
 ## チェック（PR を出す前に必須）
 
 PR を出す前にローカルで以下を必ず通すこと。CI（後述）でも同じチェックが走るが、**手元で先に通すのが原則**。

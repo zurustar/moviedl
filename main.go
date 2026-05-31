@@ -11,6 +11,12 @@ import (
 //go:embed all:frontend
 var assets embed.FS
 
+// version / buildDate はビルド時に -ldflags で注入する（docs/design.md 参照）。
+var (
+	version   = "dev"
+	buildDate = ""
+)
+
 func main() {
 	app := NewApp()
 

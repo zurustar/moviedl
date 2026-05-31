@@ -6,6 +6,10 @@ export function AddToQueue(arg1, arg2) {
   return window['go']['main']['App']['AddToQueue'](arg1, arg2);
 }
 
+export function AppVersion() {
+  return window['go']['main']['App']['AppVersion']();
+}
+
 export function CanInstallFfmpeg() {
   return window['go']['main']['App']['CanInstallFfmpeg']();
 }

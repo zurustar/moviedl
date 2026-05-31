@@ -22,9 +22,11 @@ jobs:
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
 
       - name: Build
+        env:
+          VERSION: ${{ github.ref_name }}
         run: |
           export PATH="$PATH:$(go env GOPATH)/bin"
-          wails build -platform darwin/arm64
+          wails build -ldflags "-X main.version=$VERSION -X main.buildDate=$(date -u +%Y-%m-%d)" -platform darwin/arm64
 
       - name: Package
         run: |
@@ -50,9 +52,11 @@ jobs:
 
       - name: Build
         shell: bash
+        env:
+          VERSION: ${{ github.ref_name }}
         run: |
           export PATH="$PATH:$(go env GOPATH)/bin"
-          wails build -platform windows/amd64
+          wails build -ldflags "-X main.version=$VERSION -X main.buildDate=$(date -u +%Y-%m-%d)" -platform windows/amd64
 
       - name: Package
         run: Compress-Archive -Path build\bin\moviedl.exe -DestinationPath build\bin\moviedl-windows.zip

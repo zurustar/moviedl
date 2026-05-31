@@ -40,6 +40,13 @@
       margin-bottom: 16px;
       flex-shrink: 0;
     }
+    h1 .version {
+      font-size: 11px;
+      font-weight: 400;
+      color: var(--dim);
+      letter-spacing: normal;
+      margin-left: 8px;
+    }
 
     /* ---- banners ---- */
     .banner {
@@ -249,7 +256,7 @@
 </head>
 <body>
 
-  <h1>moviedl</h1>
+  <h1>moviedl<span class="version" id="app-version"></span></h1>
 
   <div id="ytdlp-banner" class="banner">
     <span>yt-dlp が見つかりません。インストールが必要です。</span>
@@ -323,6 +330,11 @@
 
     async function init() {
       try {
+        try {
+          const v = await window.go.main.App.AppVersion();
+          if (v) document.getElementById('app-version').textContent = v;
+        } catch (_) { /* バージョン取得失敗は致命的ではない */ }
+
         saveDir = await window.go.main.App.GetDefaultDir();
         document.getElementById('save-dir').textContent = saveDir;
 

@@ -192,6 +192,21 @@ func formatDuration(secs int) string {
 	return fmt.Sprintf("%d:%02d", m, s)
 }
 
+// AppVersion はフロントエンド表示用のバージョン文字列を返す。
+func (a *App) AppVersion() string { return formatVersion(version, buildDate) }
+
+// formatVersion はバージョン表示文字列を組み立てる。
+// リリース（タグ注入済み）はタグをそのまま、dev のときだけビルド日を併記する。
+func formatVersion(version, buildDate string) string {
+	if version == "" {
+		version = "dev"
+	}
+	if version == "dev" && buildDate != "" {
+		return version + " (" + buildDate + ")"
+	}
+	return version
+}
+
 func (a *App) GetDefaultDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
