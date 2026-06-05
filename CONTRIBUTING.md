@@ -28,7 +28,7 @@ moviedl の開発環境セットアップとビルド方法、リポジトリ構
 `wails build` が `frontend/wailsjs/` のバインディングを自動再生成します。手動編集しないでください。
 出力は `build/bin/` に置かれます。
 
-`make build` はバージョン情報（`git describe` ＋ ビルド日）を `-ldflags` で埋め込みます。`wails build` を直接叩くと `version=dev` になります。リリース時は CI が git タグを注入します（[docs/design.md](docs/design.md)「バージョン情報の埋め込み」を参照）。
+`make build` はバージョン情報（`git describe` ＋ ビルド日）を `-ldflags` で埋め込みます。`wails build` を直接叩くと `version=dev` になります。リリース時は CI が git タグを注入します（[aidlc-docs/inception/application-design/design.md](aidlc-docs/inception/application-design/design.md)「バージョン情報の埋め込み」を参照）。
 
 ## チェック（PR を出す前に必須）
 
@@ -71,9 +71,11 @@ moviedl/
 ├── *_test.go           ユニットテスト（純粋関数中心）
 ├── Makefile            build / check / fmt / install-hooks などのタスク
 ├── .githooks/pre-push  push 前に make check を走らせるフック（install-hooks で有効化）
-├── docs/
-│   ├── requirements.md 要件定義（ユーザー視点での仕様）
-│   └── design.md       設計書（実装上の意思決定とピットフォール）
+├── .aidlc-rule-details/  AI-DLC ワークフローのルール詳細（CLAUDE.md 第 2 部が参照）
+├── aidlc-docs/         ドキュメント（AI-DLC 構造）
+│   └── inception/
+│       ├── requirements/requirements.md  要件定義（ユーザー視点での仕様）
+│       └── application-design/design.md  設計書（実装上の意思決定とピットフォール）
 └── .github/workflows/
     ├── ci.yml          push / PR で make check を実行する CI
     └── release.yml     v* タグ push でビルドする CI
@@ -86,7 +88,7 @@ moviedl/
 - **JS → Go**: `App` 構造体の公開メソッドが `window.go.main.App.MethodName()` として呼べる（Promise を返す）
 - **Go → JS**: `wailsruntime.EventsEmit(ctx, "download:update", payload)` で発火、JS 側は `window.runtime.EventsOn("download:update", cb)` で購読
 
-詳しい設計判断・ファイル名処理・状態遷移などは [docs/design.md](docs/design.md) を参照してください。
+詳しい設計判断・ファイル名処理・状態遷移などは [aidlc-docs/inception/application-design/design.md](aidlc-docs/inception/application-design/design.md) を参照してください。
 
 ## リリース
 

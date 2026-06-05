@@ -667,7 +667,7 @@
 
     window.runtime.EventsOn('download:update', item => {
       // error はリストに残してユーザーがリトライ・削除できるようにする。
-      // 自動削除は finished / cancelled のみ。詳細は docs/requirements.md「エラー時の挙動」。
+      // 自動削除は finished / cancelled のみ。詳細は aidlc-docs/inception/requirements/requirements.md「エラー時の挙動」。
       const terminal = item.status === 'finished' || item.status === 'cancelled';
       if (terminal) {
         delete downloads[item.id];

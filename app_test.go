@@ -36,7 +36,7 @@ func TestIsValidURL(t *testing.T) {
 	}
 }
 
-// 仕様: docs/design.md「sanitizeFilename について」
+// 仕様: aidlc-docs/inception/application-design/design.md「sanitizeFilename について」
 // 禁止文字（\ / : * ? " < > |）を _ に置換し、前後の空白と末尾のドットを除去する。
 func TestSanitizeFilename(t *testing.T) {
 	cases := []struct {
@@ -58,7 +58,7 @@ func TestSanitizeFilename(t *testing.T) {
 	}
 }
 
-// 仕様: docs/design.md「uniqueDest について」
+// 仕様: aidlc-docs/inception/application-design/design.md「uniqueDest について」
 // 同名が無ければそのまま、有れば (1)(2)… の連番を付ける。既存ファイルは上書きしない。
 func TestUniqueDest(t *testing.T) {
 	dir := t.TempDir()
@@ -94,7 +94,7 @@ func mustTouch(t *testing.T, dir, name string) {
 	}
 }
 
-// 仕様: docs/design.md「進捗通知」と parseYtDlpLine のフォーマット
+// 仕様: aidlc-docs/inception/application-design/design.md「進捗通知」と parseYtDlpLine のフォーマット
 // [download]  45.3% of   10.00MiB at    1.50MiB/s ETA 00:03
 func TestParseYtDlpLine(t *testing.T) {
 	t.Run("通常の進捗行", func(t *testing.T) {
@@ -120,7 +120,7 @@ func TestParseYtDlpLine(t *testing.T) {
 	t.Run("100%でも finished にしない（後処理が残るため）", func(t *testing.T) {
 		// 進捗 100% はダウンロード完了であって全体の成功ではない。
 		// ffmpeg 結合などの後処理が残るため、Status は進捗パースで確定させない。
-		// docs/design.md「finished は進捗 100% で決めてはならない」を参照。
+		// aidlc-docs/inception/application-design/design.md「finished は進捗 100% で決めてはならない」を参照。
 		var it DownloadItem
 		it.Status = "downloading"
 		parseYtDlpLine("[download] 100% of 5.00MiB", &it)
@@ -176,7 +176,7 @@ func TestParseYtDlpLine(t *testing.T) {
 	})
 }
 
-// 仕様: docs/design.md「バージョン情報の埋め込み」
+// 仕様: aidlc-docs/inception/application-design/design.md「バージョン情報の埋め込み」
 // リリースはタグをそのまま、dev のときだけビルド日を併記。
 func TestFormatVersion(t *testing.T) {
 	cases := []struct {
