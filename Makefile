@@ -2,7 +2,7 @@ WAILS := $(shell which wails 2>/dev/null || echo ~/go/bin/wails)
 # Go 1.25 に合わせて固定（v0.7.0 は go 1.25.0 が必要）。go.mod の Go を上げる際は併せて見直す。
 STATICCHECK := honnef.co/go/tools/cmd/staticcheck@v0.7.0
 
-# バージョン情報の埋め込み（docs/design.md「バージョン情報の埋め込み」参照）
+# バージョン情報の埋め込み（aidlc-docs/inception/application-design/design.md「バージョン情報の埋め込み」参照）
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 BUILD_DATE := $(shell date -u +%Y-%m-%d)
 LDFLAGS := -X main.version=$(VERSION) -X main.buildDate=$(BUILD_DATE)

@@ -25,19 +25,19 @@
 ## ドキュメントの置き場所
 
 - **方針（AI-DLC 優先）**: ドキュメントは AI-DLC に従い `aidlc-docs/` 配下に置く（第 2 部「Directory Structure」「Documentation: aidlc-docs/ only」）。設計・要件も対象。
-- **暫定（移行は別タスク）**: 既存の [docs/requirements.md](docs/requirements.md)・[docs/design.md](docs/design.md) は未移行のため、当面はそこを正規の参照・更新先として扱ってよい。`aidlc-docs/` への移行は別途行う。下記の moviedl 固有ルールが参照する `docs/design.md` も、移行までは現在地を指す。
+- **現状（移行済み）**: 要件は [aidlc-docs/inception/requirements/requirements.md](aidlc-docs/inception/requirements/requirements.md)、設計（実装上の取り決め・ピットフォール）は [aidlc-docs/inception/application-design/design.md](aidlc-docs/inception/application-design/design.md)。下記 moviedl 固有ルールが参照する設計ドキュメントもこのパス。
 - [README.md](README.md)（ユーザー向け使い方・配布）・[CONTRIBUTING.md](CONTRIBUTING.md)（ビルド・CI・リポジトリ構成）はアプリ付随の標準ファイルとして現状維持。
 
-実装に着手する前に該当ドキュメントを必ず読むこと。とくに `docs/design.md` には過去に踏んだ罠と対策が明文化されている。**読まずに修正すると同じデグレを繰り返す。**
+実装に着手する前に該当ドキュメントを必ず読むこと。とくに `aidlc-docs/inception/application-design/design.md` には過去に踏んだ罠と対策が明文化されている。**読まずに修正すると同じデグレを繰り返す。**
 
 ## ピットフォール記録（AI-DLC に該当なし・moviedl 固有）
 
-修正中に「なぜこれをこう書かないといけないか」が非自明な事象（=次の人が同じ罠を踏みうる事象）に出会ったら、その場で `docs/design.md`（移行後は AI-DLC の設計ドキュメント）の該当節へ追記する。
+修正中に「なぜこれをこう書かないといけないか」が非自明な事象（=次の人が同じ罠を踏みうる事象）に出会ったら、その場で `aidlc-docs/inception/application-design/design.md` の該当節へ追記する。
 記録すべき内容: **何をしてはいけないか / なぜか / 正しい代替手段**。
 
 ## 既存ピットフォールの再確認（AI-DLC に該当なし・moviedl 固有）
 
-コードを変更する前に `docs/design.md` の以下の節を最低限見ること。実装上のクリティカルなルールが書かれている。
+コードを変更する前に `aidlc-docs/inception/application-design/design.md` の以下の節を最低限見ること。実装上のクリティカルなルールが書かれている。
 
 - ファイル管理 → `(1)` サフィックス問題（`-o` 指定方針、`uniqueDest` 厳守、タイトル取得方法）
 - プレイリスト・ファイル選択 → 非同期取得・モーダル直列化・ドラッグ&ドロップ
@@ -71,7 +71,7 @@
 
 過去に直した不具合の再発はユーザーが強く嫌う。再発を疑わせる変更（特にダウンロード処理・ファイル名処理）を入れる前に:
 
-1. `docs/design.md` の該当節を読む
+1. `aidlc-docs/inception/application-design/design.md` の該当節を読む
 2. 変更が既存ルールに反していないか自問する
 3. 反する場合は理由を明示してドキュメント側を先に更新する
 

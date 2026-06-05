@@ -2,7 +2,7 @@ package main
 
 import "testing"
 
-// 仕様: docs/design.md「プレイリスト・ファイル選択」「Go 側 API」
+// 仕様: aidlc-docs/inception/application-design/design.md「プレイリスト・ファイル選択」「Go 側 API」
 // 各行 1 JSON。webpage_url 優先・無ければ url。URL 無し行とパース不能行はスキップ。
 // 有効エントリ 0 件ならエラー。
 func TestParsePlaylistJSON(t *testing.T) {
@@ -61,7 +61,7 @@ func TestParsePlaylistJSON(t *testing.T) {
 	})
 }
 
-// 仕様: docs/design.md「(1) サフィックス問題」
+// 仕様: aidlc-docs/inception/application-design/design.md「(1) サフィックス問題」
 // id が "-1" で終わり title が " (1)" で終わる場合のみ " (1)" を除去。
 func TestStripDedupSuffix(t *testing.T) {
 	cases := []struct {
@@ -80,7 +80,7 @@ func TestStripDedupSuffix(t *testing.T) {
 	}
 }
 
-// 仕様: docs/design.md「自動補充ルール（scheduler）」
+// 仕様: aidlc-docs/inception/application-design/design.md「自動補充ルール（scheduler）」
 // active < maxActive の間だけ先頭から queued を選ぶ。状態は変更しない。
 func TestSelectToStart(t *testing.T) {
 	mk := func(status string) *DownloadItem { return &DownloadItem{Status: status} }
@@ -123,7 +123,7 @@ func TestSelectToStart(t *testing.T) {
 	})
 }
 
-// 仕様: docs/design.md「Windows ffmpeg の取得」
+// 仕様: aidlc-docs/inception/application-design/design.md「Windows ffmpeg の取得」
 // zip エントリ名一覧から basename が ffmpeg.exe のエントリを返す。
 func TestFfmpegZipEntry(t *testing.T) {
 	t.Run("bin/ffmpeg.exe を選ぶ", func(t *testing.T) {
@@ -159,7 +159,7 @@ func TestFfmpegZipEntry(t *testing.T) {
 	})
 }
 
-// 仕様: docs/design.md「インストール時の完全性検証」
+// 仕様: aidlc-docs/inception/application-design/design.md「インストール時の完全性検証」
 // SHA2-256SUMS の各行 "<hexdigest>  <filename>" から assetName 行の値を返す。
 func TestParseSums(t *testing.T) {
 	data := []byte(

@@ -140,7 +140,7 @@ func (a *App) scheduler() {
 
 // selectToStart は items のうち、実行中件数が maxActive に達するまで先頭から
 // 起動すべき "queued" アイテムを返す。状態は変更しない（呼び出し側の責務）。
-// docs/design.md「自動補充ルール（scheduler）」を参照。
+// aidlc-docs/inception/application-design/design.md「自動補充ルール（scheduler）」を参照。
 func selectToStart(items []*DownloadItem, maxActive int) []*DownloadItem {
 	active := 0
 	for _, it := range items {
@@ -298,7 +298,7 @@ func (a *App) FfmpegInstallHint() string {
 
 // InstallFfmpeg は Windows 向けに ffmpeg を取得して設定フォルダへ配置する。
 // FFmpeg-Builds の win64-gpl zip を取得し、checksums.sha256 と照合してから
-// zip 内の bin/ffmpeg.exe を原子的に配置する。詳細は docs/design.md「Windows ffmpeg の取得」参照。
+// zip 内の bin/ffmpeg.exe を原子的に配置する。詳細は aidlc-docs/inception/application-design/design.md「Windows ffmpeg の取得」参照。
 func (a *App) InstallFfmpeg() error {
 	if goruntime.GOOS != "windows" {
 		return fmt.Errorf("このプラットフォームではアプリ内インストールに対応していません")
@@ -418,7 +418,7 @@ func (a *App) CheckYtDlp() bool {
 
 // InstallYtDlp は yt-dlp を GitHub Releases から取得して配置する。
 // SHA2-256SUMS の期待値とダウンロード実体の SHA256 を照合し、一致した場合のみ
-// 最終パスへ原子的に配置する。詳細は docs/design.md「インストール時の完全性検証」を参照。
+// 最終パスへ原子的に配置する。詳細は aidlc-docs/inception/application-design/design.md「インストール時の完全性検証」を参照。
 func (a *App) InstallYtDlp() error {
 	path, err := a.ytDlpPath()
 	if err != nil {
@@ -515,7 +515,7 @@ func parseSums(data []byte, assetName string) (string, error) {
 
 // stripDedupSuffix は yt-dlp の内部 dedup アーティファクト（id が "-1" で終わり
 // title が " (1)" で終わる）を検出し、付加された末尾の " (1)" を除去する。
-// それ以外は title をそのまま返す。docs/design.md「(1) サフィックス問題」を参照。
+// それ以外は title をそのまま返す。aidlc-docs/inception/application-design/design.md「(1) サフィックス問題」を参照。
 func stripDedupSuffix(id, title string) string {
 	if strings.HasSuffix(id, "-1") && strings.HasSuffix(title, " (1)") {
 		return strings.TrimSuffix(title, " (1)")
@@ -550,7 +550,7 @@ func (a *App) FetchPlaylist(rawURL string) ([]PlaylistEntry, error) {
 
 // parsePlaylistJSON は yt-dlp --dump-json の出力（1 行 1 JSON）を解析する。
 // webpage_url を優先し無ければ url を採用、URL 無し行とパース不能行はスキップする。
-// 有効エントリが 0 件ならエラーを返す。docs/design.md「プレイリスト・ファイル選択」参照。
+// 有効エントリが 0 件ならエラーを返す。aidlc-docs/inception/application-design/design.md「プレイリスト・ファイル選択」参照。
 func parsePlaylistJSON(out []byte) ([]PlaylistEntry, error) {
 	type rawEntry struct {
 		ID         string  `json:"id"`
@@ -595,7 +595,7 @@ func parsePlaylistJSON(out []byte) ([]PlaylistEntry, error) {
 // isValidURL は yt-dlp に渡してよい URL かを判定する。
 // http:// または https:// で始まることを要求し、引数インジェクション
 // （URL が "-" 始まりで yt-dlp のオプションに化ける）を入口で防ぐ。
-// 詳細は docs/design.md「引数インジェクション対策」を参照。
+// 詳細は aidlc-docs/inception/application-design/design.md「引数インジェクション対策」を参照。
 func isValidURL(raw string) bool {
 	u, err := neturl.Parse(strings.TrimSpace(raw))
 	if err != nil {
@@ -980,14 +980,14 @@ func (a *App) runDownload(item *DownloadItem) {
 	}
 	a.emit(item)
 	// エラー終了したアイテムはリストに残す（ユーザーがリトライまたは明示的に削除できるように）。
-	// 詳細は docs/design.md「エラー終了したアイテムの扱い」を参照。
+	// 詳細は aidlc-docs/inception/application-design/design.md「エラー終了したアイテムの扱い」を参照。
 	if item.Status != "error" {
 		a.removeItem(item.ID)
 	}
 }
 
 // RetryDownload はエラー終了したアイテムを再キューする。
-// docs/design.md「リトライ（RetryDownload）」を参照。
+// aidlc-docs/inception/application-design/design.md「リトライ（RetryDownload）」を参照。
 func (a *App) RetryDownload(id string) {
 	a.mu.Lock()
 	var item *DownloadItem
@@ -1119,7 +1119,7 @@ func parseYtDlpLine(line string, item *DownloadItem) {
 			item.Percent = pct
 			// 進捗 100% はダウンロード完了であって全体の成功ではない（ffmpeg 結合などの
 			// 後処理が残る）。完了の確定は runDownload の成功分岐でのみ行う。
-			// docs/design.md「finished は進捗 100% で決めてはならない」を参照。
+			// aidlc-docs/inception/application-design/design.md「finished は進捗 100% で決めてはならない」を参照。
 		}
 		if p == "of" && i+1 < len(parts) && parts[i+1] != "~" {
 			item.TotalSize = parts[i+1]
