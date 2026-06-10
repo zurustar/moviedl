@@ -2,6 +2,8 @@ module moviedl
 
 go 1.25.0
 
+toolchain go1.25.11
+
 require github.com/wailsapp/wails/v2 v2.12.0
 
 require (

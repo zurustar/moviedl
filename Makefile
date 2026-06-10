@@ -18,7 +18,7 @@ help:
 	@echo "  build-windows    Windows 向けクロスビルド (amd64)"
 	@echo "  check            PR 前チェック一式（gofmt + vet + staticcheck + test）"
 	@echo "  fmt              gofmt -w でフォーマットを自動修正"
-	@echo "  test             Go テストを実行"
+	@echo "  test             Go テストを実行（-race 付き）"
 	@echo "  install-hooks    git の pre-push フックを有効化（make check を自動実行）"
 	@echo "  install-wails    Wails CLI をインストール"
 
@@ -59,8 +59,9 @@ build-universal:
 build-windows:
 	$(WAILS) build -ldflags "$(LDFLAGS)" -platform windows/amd64
 
+# -race で DownloadItem 等の並行アクセス回帰を検出する（design.md「並行アクセスとロック規約」参照）。
 test:
-	go test ./...
+	go test -race ./...
 
 install-wails:
 	go install github.com/wailsapp/wails/v2/cmd/wails@latest

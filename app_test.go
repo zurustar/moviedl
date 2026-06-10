@@ -50,6 +50,22 @@ func TestSanitizeFilename(t *testing.T) {
 		{".hidden", ".hidden"}, // 先頭ドットは保持
 		{"日本語タイトル", "日本語タイトル"}, // Unicode はそのまま
 		{"", ""},
+
+		// 制御文字（C0 + DEL）はリモートタイトル由来の混入を除去する
+		{"a\x00b\nc\td", "abcd"},
+		{"line1\r\nline2", "line1line2"},
+		{"tab\x7fdel", "tabdel"},
+
+		// Windows 予約デバイス名は先頭に _ を付けて回避する（大小無視・拡張子付きも対象）
+		{"CON", "_CON"},
+		{"con.mp4", "_con.mp4"},
+		{"COM1.txt", "_COM1.txt"},
+		{"NUL", "_NUL"},
+		{"LPT9", "_LPT9"},
+		// 予約名でないものは変更しない
+		{"CONTACT", "CONTACT"},
+		{"COM0", "COM0"},   // COM1〜9 のみが予約
+		{"COM10", "COM10"}, // 2 桁は予約でない
 	}
 	for _, c := range cases {
 		if got := sanitizeFilename(c.in); got != c.want {
@@ -84,6 +100,53 @@ func TestUniqueDest(t *testing.T) {
 	mustTouch(t, dir, "README")
 	if got := uniqueDest(dir, "README"); got != filepath.Join(dir, "README (1)") {
 		t.Errorf("拡張子なし: got %q, want %q", got, filepath.Join(dir, "README (1)"))
+	}
+}
+
+// 仕様: uniqueDest はパスを返すだけでなく、O_CREATE|O_EXCL でその名前を
+// アトミックに予約する。touch せずに同名で 2 回呼んでも別パスを返すこと
+// （並行ダウンロードの TOCTOU で同じ名前を選んでしまう競合を防ぐ）。
+// aidlc-docs/inception/application-design/design.md「uniqueDest について」参照。
+func TestUniqueDestReservesAtomically(t *testing.T) {
+	dir := t.TempDir()
+	a := uniqueDest(dir, "x.mp4")
+	b := uniqueDest(dir, "x.mp4") // 手動 touch せずに 2 回目
+	if a == b {
+		t.Fatalf("同一パスを 2 度返した（予約されていない）: %q", a)
+	}
+	if a != filepath.Join(dir, "x.mp4") {
+		t.Errorf("1回目 = %q, want %q", a, filepath.Join(dir, "x.mp4"))
+	}
+	if b != filepath.Join(dir, "x (1).mp4") {
+		t.Errorf("2回目 = %q, want %q", b, filepath.Join(dir, "x (1).mp4"))
+	}
+	// 予約はプレースホルダーとして実体が作られている
+	if _, err := os.Stat(a); err != nil {
+		t.Errorf("予約パスが作成されていない: %v", err)
+	}
+}
+
+// 仕様: isManagedWorkDir は basename が ".moviedl-work-" 始まりのパスのみ true。
+// cleanupLeftoverWorkDirs の os.RemoveAll はこのガードを通過したものだけ削除し、
+// 改竄・破損したレジストリで任意ディレクトリを消さない。
+// aidlc-docs/inception/application-design/design.md「workDir 削除はプレフィックス検証必須」参照。
+func TestIsManagedWorkDir(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"/home/u/Downloads/.moviedl-work-1a2b3c", true},
+		{".moviedl-work-xyz", true},
+		{"/home/u/Downloads", false},
+		{"/", false},
+		{"/home/u/.moviedl-work", false}, // 末尾ダッシュなし → プレフィックス不一致
+		{"/home/u/Movies", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := isManagedWorkDir(c.in); got != c.want {
+			t.Errorf("isManagedWorkDir(%q) = %v, want %v", c.in, got, c.want)
+		}
 	}
 }
 
