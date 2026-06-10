@@ -659,15 +659,17 @@ func (a *App) PauseDownload(id string) {
 			break
 		}
 	}
+	var cmd *exec.Cmd
 	if item != nil {
 		item.Status = "paused"
+		cmd = item.cmd // runDownload はロック内で item.cmd を書くため、退避もロック内で行う
 	}
 	a.mu.Unlock()
 	if item == nil {
 		return
 	}
-	if item.cmd != nil {
-		suspendProcess(item.cmd) //nolint:errcheck
+	if cmd != nil {
+		suspendProcess(cmd) //nolint:errcheck
 	}
 	a.emit(item)
 	a.notify()
@@ -683,15 +685,17 @@ func (a *App) ResumeDownload(id string) {
 			break
 		}
 	}
+	var cmd *exec.Cmd
 	if item != nil {
 		item.Status = "downloading"
+		cmd = item.cmd // ロック内で退避（runDownload がロック内で書くため）
 	}
 	a.mu.Unlock()
 	if item == nil {
 		return
 	}
-	if item.cmd != nil {
-		resumeProcess(item.cmd) //nolint:errcheck
+	if cmd != nil {
+		resumeProcess(cmd) //nolint:errcheck
 	}
 	a.emit(item)
 }
@@ -705,6 +709,14 @@ func (a *App) CancelDownload(id string) {
 			break
 		}
 	}
+	// cmd と status はロック内で退避する（runDownload がロック内で item.cmd を書き、
+	// status も他経路と競合しうるため）。
+	var cmd *exec.Cmd
+	var status string
+	if item != nil {
+		cmd = item.cmd
+		status = item.Status
+	}
 	a.mu.Unlock()
 
 	if item == nil {
@@ -712,16 +724,18 @@ func (a *App) CancelDownload(id string) {
 	}
 	item.markCancelled()
 
-	if item.cmd != nil && item.cmd.Process != nil {
+	if cmd != nil && cmd.Process != nil {
 		// Resume before killing so the process can receive SIGKILL on Unix.
-		if item.Status == "paused" {
-			resumeProcess(item.cmd) //nolint:errcheck
+		if status == "paused" {
+			resumeProcess(cmd) //nolint:errcheck
 		}
-		item.cmd.Process.Kill() //nolint:errcheck
+		cmd.Process.Kill() //nolint:errcheck
 	}
 
-	if item.Status == "queued" || item.Status == "paused" || item.Status == "error" {
+	if status == "queued" || status == "paused" || status == "error" {
+		a.mu.Lock()
 		item.Status = "cancelled"
+		a.mu.Unlock()
 		a.emit(item)
 		a.removeItem(item.ID)
 	}
@@ -789,7 +803,7 @@ func (a *App) runDownload(item *DownloadItem) {
 	}
 
 	// STEP 1: workDir を作る
-	workDir, err := os.MkdirTemp(item.outputDir, ".moviedl-work-")
+	workDir, err := os.MkdirTemp(item.outputDir, workDirPrefix)
 	if err != nil {
 		item.Status = "error"
 		item.Error = err.Error()
@@ -967,6 +981,8 @@ func (a *App) runDownload(item *DownloadItem) {
 				}
 				if err := os.Rename(srcPath, dst); err != nil {
 					logf("[STEP5] rename error: %v", err)
+					// uniqueDest が予約した 0 バイトプレースホルダーが残らないよう後始末する。
+					os.Remove(dst) //nolint:errcheck
 				} else {
 					logf("[STEP5] rename OK")
 				}
@@ -1066,30 +1082,92 @@ func unregisterWorkDir(path string) {
 	writeWorkDirRegistry(filtered)
 }
 
+// workDirPrefix は runDownload が outputDir 内に作る一時作業ディレクトリ名の
+// プレフィックス（os.MkdirTemp のパターン）。cleanupLeftoverWorkDirs の削除ガードにも使う。
+const workDirPrefix = ".moviedl-work-"
+
+// isManagedWorkDir は path がこのアプリの作業ディレクトリ（basename が
+// workDirPrefix 始まり）かを判定する。cleanupLeftoverWorkDirs はこのガードを
+// 通過したパスだけを os.RemoveAll するため、workdirs.json が改竄・破損して
+// 不正なパスが混入しても任意ディレクトリを削除しない。
+// aidlc-docs/inception/application-design/design.md「workDir 削除はプレフィックス検証必須」参照。
+func isManagedWorkDir(path string) bool {
+	return strings.HasPrefix(filepath.Base(path), workDirPrefix)
+}
+
 func cleanupLeftoverWorkDirs() {
 	dirs := readWorkDirRegistry()
 	for _, d := range dirs {
-		os.RemoveAll(d) //nolint:errcheck
+		if isManagedWorkDir(d) {
+			os.RemoveAll(d) //nolint:errcheck
+		}
 	}
 	writeWorkDirRegistry(nil)
 }
 
 func sanitizeFilename(s string) string {
+	// リモートタイトル由来の制御文字（C0 制御 + DEL）を除去する。改行などが
+	// ファイル名に混入すると保存失敗やログ汚染の原因になる。
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
 	r := strings.NewReplacer(`\`, "_", `/`, "_", `:`, "_", `*`, "_", `?`, "_", `"`, "_", `<`, "_", `>`, "_", `|`, "_")
 	s = r.Replace(s)
-	return strings.TrimRight(strings.TrimSpace(s), ". ")
+	s = strings.TrimRight(strings.TrimSpace(s), ". ")
+	// Windows 予約デバイス名（CON, NUL, COM1〜9 等）はそのままだとファイル作成に
+	// 失敗するため、先頭に _ を付けて回避する。
+	if isWindowsReservedName(s) {
+		s = "_" + s
+	}
+	return s
 }
 
-func uniqueDest(dir, name string) string {
-	dst := filepath.Join(dir, name)
-	if _, err := os.Stat(dst); os.IsNotExist(err) {
-		return dst
+// isWindowsReservedName は name（拡張子は無視）が Windows の予約デバイス名かを判定する。
+// 大文字小文字は区別しない。CON / PRN / AUX / NUL と COM1〜9 / LPT1〜9 が対象。
+func isWindowsReservedName(name string) bool {
+	base := strings.ToUpper(strings.TrimSuffix(name, filepath.Ext(name)))
+	switch base {
+	case "CON", "PRN", "AUX", "NUL":
+		return true
 	}
+	if len(base) == 4 && base[3] >= '1' && base[3] <= '9' {
+		switch base[:3] {
+		case "COM", "LPT":
+			return true
+		}
+	}
+	return false
+}
+
+// uniqueDest は dir 配下に name の衝突しない保存先パスを返す。既存ファイルは
+// 決して上書きせず、衝突時は " (1)" " (2)"… の連番を付ける。
+//
+// 単に Stat で空きを確認して返すのではなく、O_CREATE|O_EXCL で 0 バイトの
+// プレースホルダーを作って名前をアトミックに予約する。これにより「空きを
+// 確認してから rename するまで」の TOCTOU 窓（並行ダウンロードで同じタイトルを
+// 同時取得した際に同名を選んでしまう競合や、外部プロセスが割り込む競合）を閉じる。
+// 呼び出し側は返ったパスへ実体を os.Rename する（os.Rename は Unix/Windows とも
+// このプレースホルダーを置換する）。rename に失敗した場合は os.Remove で後始末する。
+// aidlc-docs/inception/application-design/design.md「uniqueDest について」参照。
+func uniqueDest(dir, name string) string {
 	ext := filepath.Ext(name)
 	base := strings.TrimSuffix(name, ext)
-	for i := 1; ; i++ {
-		candidate := filepath.Join(dir, fmt.Sprintf("%s (%d)%s", base, i, ext))
-		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+	for i := 0; ; i++ {
+		candidate := filepath.Join(dir, name)
+		if i > 0 {
+			candidate = filepath.Join(dir, fmt.Sprintf("%s (%d)%s", base, i, ext))
+		}
+		f, err := os.OpenFile(candidate, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			f.Close() //nolint:errcheck
+			return candidate
+		}
+		if !os.IsExist(err) {
+			// 予約できない予期せぬエラー（権限など）。従来挙動に倣い候補をそのまま返し、
+			// rename 側でエラーをハンドリングさせる。
 			return candidate
 		}
 	}

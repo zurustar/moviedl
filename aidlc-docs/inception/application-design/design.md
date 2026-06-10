@@ -56,6 +56,14 @@ args = append(args, "--", item.URL) // 本ダウンロード
 - `http.Get`（タイムアウトなし）ではなく、タイムアウト付き `http.Client` を使う（ハング防止）。
 - 検証は「まずメモリ（またはテンポラリ）に受けて SHA256 を確認 → 一致したら最終パスへ書き込む」順序にする。検証前の実体を最終パスに置かない。
 
+**残存リスク（完全性 ≠ 真正性）:** SHA は**バイナリと同じ GitHub リリース**から取る（`SHA2-256SUMS` /
+`checksums.sha256`）。これは**転送破損**を検出するが、**リリース自体が侵害された場合は検出できない**
+（チェックサムも同時に差し替えられるため）。また `releases/latest` 参照のため**バージョン固定はなく**、
+配置後のバイナリ（ユーザー書き込み可能な設定フォルダ内）は**起動時に再検証されない**ため、ローカル
+マルウェアによる差し替えは検出できない。これはデスクトップアプリとして許容するトレードオフだが、
+強化するなら（a）バージョンピン + ピン時点ダイジェストの同梱、（b）起動時の実行ファイル再検証、を
+検討する。（2026-06-10 セキュリティ監査 T3）
+
 ### ffmpeg
 
 映像・音声ストリームの結合およびリマックスに ffmpeg を使用する。
@@ -311,9 +319,18 @@ type PlaylistEntry struct {
 ### 作業ディレクトリ
 
 - ダウンロードごとに保存先フォルダ内に作業ディレクトリ（`.moviedl-work-XXXX`）を作成する
+  - プレフィックスは定数 `workDirPrefix`（`.moviedl-work-`）。`os.MkdirTemp` のパターンに使う
 - 保存先フォルダ内に置く理由:
   - クラッシュ時にユーザーが可視・手動削除できる
   - 保存先と同一ファイルシステムのため、ファイル移動が確実
+
+#### workDir 削除はプレフィックス検証必須
+
+起動時 `cleanupLeftoverWorkDirs` は `workdirs.json` に記録された残骸 workDir を `os.RemoveAll` で
+掃除する。**`workdirs.json` のパスを無検証で `os.RemoveAll` してはならない。** このファイルは
+ユーザー設定フォルダ内の平文（0644）で、改竄やバグで不正なパス（例: ホームディレクトリ）が
+混入すると任意ディレクトリを再帰削除しうる。**必ず `isManagedWorkDir`（basename が `workDirPrefix`
+始まりか）で検証し、通過したパスだけを削除する。** 判定は `TestIsManagedWorkDir` で固定。
 
 ### yt-dlp への指示
 
@@ -383,8 +400,21 @@ os.Rename(workDir/ID.mp4, 移動先)
 同名ファイルが存在する場合に連番を付与して保護するための関数。
 **絶対に削除・迂回してはならない。** ユーザーの既存ファイルを上書きすることは厳禁。
 
+`uniqueDest` は単に空きパスを返すのではなく、`O_CREATE|O_EXCL` で 0 バイトの
+プレースホルダーを作って名前を**アトミックに予約**する。`os.Stat` で空きを確認してから
+`os.Rename` するまでの TOCTOU 窓（並行ダウンロード最大 10 で同じタイトルを同時取得した際に
+同名を選ぶ競合や、外部プロセスの割り込み）を閉じるため。呼び出し側（runDownload STEP5）は
+返ったパスへ実体を `os.Rename` する（`os.Rename` は Unix/Windows ともこのプレースホルダーを
+置換する）。**rename に失敗した場合は `os.Remove(dst)` で予約プレースホルダーを後始末する**こと
+（0 バイトファイルの残留を防ぐ）。挙動は `TestUniqueDest` / `TestUniqueDestReservesAtomically` で固定。
+
 **sanitizeFilename について:**
-Windows で使えない文字（`\ / : * ? " < > |`）をアンダースコアに置換し、**前後の空白**と**末尾のドット**を除去する（先頭のドットは保持＝隠しファイル名は維持しない設計ではない）。挙動は `TestSanitizeFilename` で固定。
+処理順は ①**制御文字（C0 制御 `< 0x20` と DEL `0x7f`）を除去** → ②Windows で使えない文字
+（`\ / : * ? " < > |`）をアンダースコアに置換 → ③**前後の空白**と**末尾のドット**を除去（先頭の
+ドットは保持）→ ④**Windows 予約デバイス名**（`CON` `PRN` `AUX` `NUL` と `COM1`〜`9` / `LPT1`〜`9`、
+大小無視・拡張子付きも対象）なら先頭に `_` を付けて回避。制御文字と予約名はリモートタイトル由来の
+混入でファイル作成失敗・ログ汚染を起こすため弾く。判定は `isWindowsReservedName` に分離。挙動は
+`TestSanitizeFilename` で固定。
 
 #### `(1)` サフィックス問題の根本原因と対策
 
@@ -437,3 +467,38 @@ GitHub Actions で `v*` タグ push をトリガーに自動ビルドする。
 | build-windows | windows-latest | moviedl-windows.zip |
 
 ffmpeg はバイナリに同梱しない（Windows も含む）。両プラットフォームとも `wails build` をそのまま実行する。Windows の ffmpeg はアプリ初回起動後に `InstallFfmpeg` で取得する（上記「ffmpeg」節を参照）。
+
+**サードパーティ GitHub Actions は commit SHA でピンする。** `softprops/action-gh-release` は
+`contents: write` 権限を持つため、タグ（`@v2`）参照ではタグ書き換えによるサプライチェーン攻撃に
+晒される。`@<40桁SHA> # v2` の形でピンし、タグ更新時は SHA も併せて見直す。公式 `actions/*` は任意。
+（2026-06-10 セキュリティ監査 T8）
+
+---
+
+## 並行アクセスとロック規約
+
+`DownloadItem` は複数 goroutine から触られる。`runDownload`（各ダウンロード専用 goroutine）と、
+UI 由来の `PauseDownload` / `ResumeDownload` / `CancelDownload` / `StartDownload` などが同時に動きうる。
+
+- **`item.cmd` は `a.mu` の保護下で読み書きする。** `runDownload` はロック内で `item.cmd` を書く。
+  Pause/Resume/Cancel 側も**ロック内でローカル変数に退避してから**、ロック外で
+  `suspendProcess` / `resumeProcess` / `Kill` を呼ぶ。ロック外で `item.cmd` を直接読むと
+  データ競合になる（過去そうだった）。`item.Status` の判定も同様にロック内で退避した値を使う。
+- 回帰防止のため **`make test` は `go test -race`** で回す（CI の `make check` も同じ）。
+  並行経路を変更したら -race が緑であることを完了条件にする。
+- 既知の限界: ダウンロード中の進捗フィールド（`Percent` / `Speed` 等）は `runDownload` の
+  scanner ループが直接更新し `emit` で読む経路が残る。現状テストは並行ダウンロードを再現しないため
+  -race では顕在化しない。さらに厳密化するなら進捗更新も `a.mu` 配下に寄せる。（2026-06-10 監査 T7）
+
+---
+
+## WebView / IPC セキュリティ
+
+- **WebView にリモートコンテンツを読み込まない。** フロントエンドは `embed` した `frontend/` の
+  ローカル資産のみを読む（`main.go` の `assetserver`）。WebView には `App` のメソッド（`AddToQueue`
+  など**ファイル書き込みを伴う操作**）がバインドされているため、リモート HTML を読み込むと
+  それらが攻撃面になる。外部 URL を WebView に流す導線を足さないこと。
+- **DOM へ差し込むリモート由来データ（タイトル・URL・エラー文言・duration 等）は必ず `esc()` を通す。**
+  `esc()` は `& < > " '` を実体参照化する。シングルクォートも escape するのは、`onclick="fn('${esc(x)}')"`
+  のように**属性内のシングルクォート文字列**へ動的値を埋めるパターンでも XSS にならないようにするため。
+  動的に組む属性値・ハンドラ引数には素の値を絶対に入れない。（2026-06-10 監査 T5）

@@ -660,9 +660,12 @@
     }
 
     function esc(s) {
+      // & は最初に処理する。属性値は二重引用符で囲うが、将来 onclick="...('${esc(x)}')"
+      // のようにシングルクォート内へ動的値を埋めても壊れない / XSS にならないよう ' も escape する。
       return String(s)
         .replace(/&/g,'&amp;').replace(/</g,'&lt;')
-        .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+        .replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+        .replace(/'/g,'&#39;');
     }
 
     window.runtime.EventsOn('download:update', item => {

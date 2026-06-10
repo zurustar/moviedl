@@ -74,7 +74,9 @@ jobs:
         with:
           path: artifacts
 
-      - uses: softprops/action-gh-release@v2
+      # サードパーティアクションはサプライチェーン保護のため commit SHA でピンする
+      # （contents: write 権限を持つため）。タグ更新時は SHA も併せて見直す。
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             artifacts/macos-build/moviedl-macos.zip
