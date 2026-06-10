@@ -867,25 +867,13 @@ func (a *App) runDownload(item *DownloadItem) {
 		}
 	}
 
-	args := []string{
-		"--newline", "--progress", "--no-mtime",
-		"--encoding", "utf-8",
-		"-o", tmpBase + ".%(ext)s",
-		"-P", "home:" + workDir,
-		"-P", "temp:" + workDir,
-	}
-	if ff := ffmpegPath(); ff != "" {
-		args = append(args,
-			"--ffmpeg-location", ff,
-			"-f", "bestvideo+bestaudio/best",
-			"--merge-output-format", "mp4",
-		)
+	ff := ffmpegPath()
+	if ff != "" {
 		logf("[STEP2] ffmpeg found: %s", ff)
 	} else {
-		args = append(args, "-f", "best[ext=mp4]/best")
 		logf("[STEP2] ffmpeg not found, using single-format fallback")
 	}
-	args = append(args, "--", item.URL)
+	args := buildYtDlpArgs(tmpBase, workDir, ff, item.URL)
 	logf("[STEP2] command: %s %s", ytdlp, strings.Join(args, " "))
 
 	cmd := exec.Command(ytdlp, args...)
@@ -1171,6 +1159,39 @@ func uniqueDest(dir, name string) string {
 			return candidate
 		}
 	}
+}
+
+// buildYtDlpArgs は yt-dlp に渡す引数列を組み立てる。ffmpegLoc が空文字なら
+// ffmpeg なし（単一フォーマット）のフォールバックになる。
+//
+// 堅牢化: yt-dlp の既定は取得失敗した断片を黙ってスキップして続行するため、
+// 一時的なネットワーク不調で映像が途中で止まる・無音になったまま「成功」扱いに
+// なりうる。--abort-on-unavailable-fragment で握りつぶさず中断（エラー）させ、
+// --retries / --fragment-retries / --socket-timeout で一時障害を吸収する。
+// aidlc-docs/inception/application-design/design.md「ダウンロードの堅牢化」を参照。
+func buildYtDlpArgs(tmpBase, workDir, ffmpegLoc, url string) []string {
+	args := []string{
+		"--newline", "--progress", "--no-mtime",
+		"--encoding", "utf-8",
+		"--retries", "10",
+		"--fragment-retries", "10",
+		"--abort-on-unavailable-fragment",
+		"--socket-timeout", "30",
+		"-o", tmpBase + ".%(ext)s",
+		"-P", "home:" + workDir,
+		"-P", "temp:" + workDir,
+	}
+	if ffmpegLoc != "" {
+		args = append(args,
+			"--ffmpeg-location", ffmpegLoc,
+			"-f", "bestvideo+bestaudio/best",
+			"--merge-output-format", "mp4",
+		)
+	} else {
+		args = append(args, "-f", "best[ext=mp4]/best")
+	}
+	args = append(args, "--", url)
+	return args
 }
 
 func parseYtDlpLine(line string, item *DownloadItem) {
