@@ -104,6 +104,43 @@ ffmpeg がない場合:
 -f best[ext=mp4]/best
 ```
 
+引数の組み立ては純粋関数 `buildYtDlpArgs(tmpBase, workDir, ffmpegLoc, url)` に分離し、
+`TestBuildYtDlpArgs` でテストする（`runDownload` から呼ぶ）。
+
+### ダウンロードの堅牢化
+
+**問題**: DASH/HLS のような断片配信では、yt-dlp の既定動作は「取得に失敗した断片を
+黙ってスキップして続行」（`--skip-unavailable-fragments` が既定）。このため一時的な
+ネットワーク不調で**一部の断片が欠けたまま**ファイルが完成し、
+
+- 再生がその地点で**止まる／カクつく／無音になる**
+- yt-dlp は正常終了するため、本アプリは `finished`（成功）として扱い、ユーザーは欠損に気づかない
+
+という症状が出る（「他の方法より途中で止まりやすい」の主因と推定）。
+
+**対策**: `buildYtDlpArgs` で全ダウンロードに以下を常時付与する（ffmpeg 有無に関わらず）。
+
+```
+--retries 10
+--fragment-retries 10
+--abort-on-unavailable-fragment
+--socket-timeout 30
+```
+
+- `--abort-on-unavailable-fragment` が肝。断片が取得不能なら**スキップせず中断**し、
+  yt-dlp が非ゼロ終了 → `runDownload` のエラー分岐で `Status="error"` になる。
+  「finished は進捗 100% で決めてはならない」「後処理失敗の握りつぶし防止」と同じ思想。
+- `--retries` / `--fragment-retries` は一時障害をリトライで吸収（明示。値は既定と同じ 10 だが意図を残す）。
+- `--socket-timeout` は死んだ接続を早期検出してリトライに回す。
+
+**やってはいけない**: 堅牢化のつもりで `--fragment-retries infinite` にすると、恒久的に
+取得不能な断片（403/404 等）でハングする。`--abort-on-unavailable-fragment` と組み合わせる
+場合は**有限のリトライ回数**にすること（無限リトライだと中断条件に到達しない）。
+
+**挙動変更の注意（デグレ観点）**: この対策により、従来は「欠損したまま成功」だった
+ダウンロードが**エラー表示に変わる**。これは意図した改善（壊れたファイルを成功と偽らない）
+だが、ユーザーには再ダウンロードを促す挙動になる点を理解しておくこと。
+
 ---
 
 ## ダウンロード状態管理

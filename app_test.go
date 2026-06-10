@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -241,6 +242,70 @@ func TestParseYtDlpLine(t *testing.T) {
 
 // 仕様: aidlc-docs/inception/application-design/design.md「バージョン情報の埋め込み」
 // リリースはタグをそのまま、dev のときだけビルド日を併記。
+// 仕様: aidlc-docs/inception/application-design/design.md「ダウンロードの堅牢化」「フォーマット選択」
+func TestBuildYtDlpArgs(t *testing.T) {
+	join := func(a []string) string { return strings.Join(a, " ") }
+
+	t.Run("堅牢化オプションは ffmpeg 有無に関わらず常に付く", func(t *testing.T) {
+		for _, ff := range []string{"", "/usr/bin/ffmpeg"} {
+			got := join(buildYtDlpArgs("abc", "/work", ff, "https://e.com/v"))
+			for _, want := range []string{
+				"--abort-on-unavailable-fragment",
+				"--fragment-retries 10",
+				"--retries 10",
+				"--socket-timeout 30",
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("ffmpegLoc=%q: args %q に %q がない", ff, got, want)
+				}
+			}
+		}
+	})
+
+	t.Run("ffmpeg あり → 映像+音声の最高画質を mp4 結合", func(t *testing.T) {
+		s := join(buildYtDlpArgs("abc", "/work", "/usr/bin/ffmpeg", "https://e.com/v"))
+		for _, want := range []string{
+			"--ffmpeg-location /usr/bin/ffmpeg",
+			"-f bestvideo+bestaudio/best",
+			"--merge-output-format mp4",
+		} {
+			if !strings.Contains(s, want) {
+				t.Errorf("args %q に %q がない", s, want)
+			}
+		}
+	})
+
+	t.Run("ffmpeg なし → 単一フォーマットにフォールバックし結合しない", func(t *testing.T) {
+		s := join(buildYtDlpArgs("abc", "/work", "", "https://e.com/v"))
+		if !strings.Contains(s, "-f best[ext=mp4]/best") {
+			t.Errorf("フォールバック書式がない: %q", s)
+		}
+		if strings.Contains(s, "--merge-output-format") {
+			t.Errorf("ffmpeg なしで結合してはいけない: %q", s)
+		}
+	})
+
+	t.Run("URL は -- 区切りの直後で末尾", func(t *testing.T) {
+		got := buildYtDlpArgs("abc", "/work", "", "https://e.com/v")
+		if got[len(got)-1] != "https://e.com/v" {
+			t.Errorf("URL が末尾でない: %v", got)
+		}
+		if got[len(got)-2] != "--" {
+			t.Errorf("URL の直前が -- でない: %v", got)
+		}
+	})
+
+	t.Run("出力テンプレートと作業ディレクトリ指定", func(t *testing.T) {
+		s := join(buildYtDlpArgs("abc123", "/work", "", "https://e.com/v"))
+		if !strings.Contains(s, "-o abc123.%(ext)s") {
+			t.Errorf("出力テンプレートがない: %q", s)
+		}
+		if !strings.Contains(s, "-P home:/work") || !strings.Contains(s, "-P temp:/work") {
+			t.Errorf("-P 指定がない: %q", s)
+		}
+	})
+}
+
 func TestFormatVersion(t *testing.T) {
 	cases := []struct {
 		version, buildDate, want string
