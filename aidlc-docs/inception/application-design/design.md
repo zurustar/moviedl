@@ -316,9 +316,12 @@ func resumeProcess(cmd *exec.Cmd) error  { /* NtResumeProcess  */ }
 
 ### ドラッグ&ドロップ入力
 
-- URL 入力欄を `drop` ターゲットにする
-- `dragover` イベントで `preventDefault()` を呼び、入力欄を有効なドロップターゲットとして登録する
-- `drop` イベントで `event.preventDefault()` を呼び、ブラウザのデフォルト動作（URL でのページ遷移など）を抑止する
+- **ウィンドウ全体を `drop` ターゲットにする。** `dragover` / `drop` を `window`（document）レベルで購読する。
+  - **やってはいけないこと:** ドロップ受け口を URL 入力欄だけに付ける。落とす位置がシビアになり、欄の外に落とすと WebView の既定動作で**ドロップした URL へ遷移してしまう**（別表示が開く）。
+- `dragover` イベントで `preventDefault()` を呼び、ウィンドウ全体を有効なドロップターゲットとして登録する（`dropEffect = 'copy'`）。
+- `drop` イベントで `event.preventDefault()` を**必ず**呼び、ブラウザのデフォルト動作（URL でのページ遷移・別表示）を抑止する。URL を含まないドロップでも遷移阻止のため preventDefault する。
+- ハンドラはウィンドウに一本化し、入力欄個別の `ondrop` は付けない（二重登録による重複処理を避ける）。
+- ドロップ位置に応じた視覚フィードバック（ウィンドウ全体のハイライト）を出してよい。
 - ドロップデータの取得優先順位: `text/uri-list` → `text/plain`
 - `text/uri-list` は RFC 2483 に従い改行区切りで複数 URL を含み、`#` で始まる行はコメント。これらを除外する
 - `text/plain` も改行区切りで複数行入力を許容する
