@@ -316,9 +316,11 @@ func resumeProcess(cmd *exec.Cmd) error  { /* NtResumeProcess  */ }
 
 ### ドラッグ&ドロップ入力
 
-- **ウィンドウ全体を `drop` ターゲットにする。** `dragover` / `drop` を `window`（document）レベルで購読する。
+- **ウィンドウ全体を `drop` ターゲットにする。** `dragenter` / `dragover` / `drop` を `window`（document）レベルで購読する。
   - **やってはいけないこと:** ドロップ受け口を URL 入力欄だけに付ける。落とす位置がシビアになり、欄の外に落とすと WebView の既定動作で**ドロップした URL へ遷移してしまう**（別表示が開く）。
-- `dragover` イベントで `preventDefault()` を呼び、ウィンドウ全体を有効なドロップターゲットとして登録する（`dropEffect = 'copy'`）。
+- **`window` の DnD ハンドラは必ずキャプチャフェーズで登録する**（`addEventListener(..., true)`）。
+  - **やってはいけないこと:** バブリングフェーズ（既定）で登録する。`window` のハンドラはバブリングだと「最後」に発火するため、URL テキストを表示している要素（とくにエラー項目の `.dl-title` は `d.title` が無く URL がそのまま出る）の上にドロップすると、WebView がターゲットフェーズでネイティブのリンク遷移を先に開始してしまい、`preventDefault()` が間に合わず**別ウィンドウでその URL が開く**。空白領域はネイティブのドロップ処理が無いためバブリングでも抑止できてしまい、「エラー項目の上だけ遷移する」という分かりにくい症状になる。キャプチャで要素より先に `preventDefault()` を効かせること。
+- `dragover` イベントで `preventDefault()` を呼び、ウィンドウ全体を有効なドロップターゲットとして登録する（`dropEffect = 'copy'`）。`dragenter` でも `preventDefault()` し、要素ごとの既定ドロップ処理の起点を潰す。
 - `drop` イベントで `event.preventDefault()` を**必ず**呼び、ブラウザのデフォルト動作（URL でのページ遷移・別表示）を抑止する。URL を含まないドロップでも遷移阻止のため preventDefault する。
 - ハンドラはウィンドウに一本化し、入力欄個別の `ondrop` は付けない（二重登録による重複処理を避ける）。
 - ドロップ位置に応じた視覚フィードバック（ウィンドウ全体のハイライト）を出してよい。

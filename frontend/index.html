@@ -453,15 +453,27 @@
       document.body.classList.add('dragover');
     }
 
+    function handleDragEnter(event) {
+      // dragenter も抑止しておく。要素ごとの既定ドロップ処理に先んじて
+      // 「JS が受けるドロップ」だと宣言し、ネイティブ遷移の起点を潰す。
+      event.preventDefault();
+    }
+
     function handleDragLeave(event) {
       // ウィンドウ外に出たときだけハイライトを消す（子要素間の移動では消さない）。
       if (event.relatedTarget === null) document.body.classList.remove('dragover');
     }
 
     // ウィンドウ全体をドロップ対象として登録する（入力欄個別の ondrop は付けない）。
-    window.addEventListener('dragover', handleDragOver);
-    window.addEventListener('drop', handleDrop);
-    window.addEventListener('dragleave', handleDragLeave);
+    // 第 3 引数 true（キャプチャフェーズ）が必須。バブリングだと window のハンドラが
+    // 「最後」に発火するため、URL テキストを表示する要素（エラー項目の .dl-title など）の
+    // 上では WebView がターゲットフェーズでネイティブ遷移を始めてしまい、preventDefault が
+    // 間に合わず別ウィンドウで URL が開く。キャプチャで要素より先に遷移を止める。
+    // 詳細は aidlc-docs/inception/application-design/design.md「ドラッグ&ドロップ入力」を参照。
+    window.addEventListener('dragenter', handleDragEnter, true);
+    window.addEventListener('dragover', handleDragOver, true);
+    window.addEventListener('drop', handleDrop, true);
+    window.addEventListener('dragleave', handleDragLeave, true);
 
     function tryOpenNextModal() {
       if (modalOpen || modalQueue.length === 0) return;
