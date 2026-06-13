@@ -61,6 +61,35 @@ func TestParsePlaylistJSON(t *testing.T) {
 	})
 }
 
+// 仕様: aidlc-docs/inception/application-design/design.md「キュー登録（AddToQueue）と重複防止」
+// items のいずれかが同一 URL を持てば true（完全一致）。状態は問わない。
+func TestContainsURL(t *testing.T) {
+	items := []*DownloadItem{
+		{URL: "https://x/a", Status: "downloading"},
+		{URL: "https://x/b", Status: "queued"},
+		{URL: "https://x/c", Status: "error"},
+	}
+	cases := []struct {
+		url  string
+		want bool
+	}{
+		{"https://x/b", true},      // queued と一致
+		{"https://x/a", true},      // downloading と一致
+		{"https://x/c", true},      // error とも一致（状態は問わない）
+		{"https://x/d", false},     // 未登録
+		{"https://x/b?z=1", false}, // 完全一致のみ
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := containsURL(items, c.url); got != c.want {
+			t.Errorf("containsURL(_, %q) = %v, want %v", c.url, got, c.want)
+		}
+	}
+	if containsURL(nil, "https://x/a") {
+		t.Error("空リストで true になった")
+	}
+}
+
 // 仕様: aidlc-docs/inception/application-design/design.md「(1) サフィックス問題」
 // id が "-1" で終わり title が " (1)" で終わる場合のみ " (1)" を除去。
 func TestStripDedupSuffix(t *testing.T) {

@@ -191,6 +191,18 @@ items を先頭から走査し、active < maxActive である限り
 
 手動開始（`StartDownload`）は `maxActive` の制約を受けない。設定値を超えて並行ダウンロードを開始できる。
 
+### キュー登録（AddToQueue）と重複防止
+
+`AddToQueue(url, outputDir)` は URL をキューへ登録するが、**既存アイテムと同一 URL の重複登録を防ぐ**。
+
+- `isValidURL` を通過したのち、`a.mu` ロック下で `containsURL(a.items, url)` を評価する。`items` のいずれかが同一 URL を持てば**登録せず空文字 `""` を返す**（呼び出し側はそのまま無視＝静かにスキップ。不正 URL 時と同じ戻り）。
+- 比較は完全一致。単一動画は `entries[0].url`、プレイリストは各 `entry.url`（いずれも yt-dlp が返す正規 URL）が `DownloadItem.URL` に入るため、生入力の表記揺れに依らず正規 URL 同士で判定できる。
+- 重複判定の対象は `items` に現存する全アイテム（queued / downloading / paused / error）。完了（finished）・キャンセル（cancelled）は `items` から除去済みのため自然に対象外。
+- **重複チェックと append は同一ロック区間で行う**こと。Wails の各 IPC 呼び出しは別 goroutine で走るため、同一 URL の同時登録が二重に通るのを防ぐ。
+- 判定は純粋関数 `containsURL([]*DownloadItem, string) bool` に切り出してテストする。
+
+エラー状態の同一 URL を再実行したい場合は「リトライ」ボタンを使う（重複登録ではなく既存アイテムの再キュー）。
+
 ### 手動開始（StartDownload）
 
 `StartDownload(id string)` を JS から呼ぶと:
