@@ -604,10 +604,29 @@ func isValidURL(raw string) bool {
 	return (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
+// containsURL は items のいずれかが同一 URL（完全一致）を持つかを返す。
+// 重複登録防止に使う。aidlc-docs/inception/application-design/design.md
+// 「キュー登録（AddToQueue）と重複防止」を参照。
+func containsURL(items []*DownloadItem, url string) bool {
+	for _, it := range items {
+		if it.URL == url {
+			return true
+		}
+	}
+	return false
+}
+
 // AddToQueue registers a URL as a queued item and notifies the scheduler.
-// 不正な URL（http/https 以外）は空文字を返して登録を拒否する。
+// 不正な URL（http/https 以外）、および既存アイテムと同一 URL（重複）は
+// 空文字を返して登録を拒否する。重複チェックと append は同一ロック区間で行う
+// （Wails の各 IPC は別 goroutine のため、同一 URL の同時登録を防ぐ）。
 func (a *App) AddToQueue(url, outputDir string) string {
 	if !isValidURL(url) {
+		return ""
+	}
+	a.mu.Lock()
+	if containsURL(a.items, url) {
+		a.mu.Unlock()
 		return ""
 	}
 	id := fmt.Sprintf("%d", atomic.AddInt64(&dlCounter, 1))
@@ -617,7 +636,6 @@ func (a *App) AddToQueue(url, outputDir string) string {
 		outputDir: outputDir,
 		Status:    "queued",
 	}
-	a.mu.Lock()
 	a.items = append(a.items, item)
 	a.mu.Unlock()
 
