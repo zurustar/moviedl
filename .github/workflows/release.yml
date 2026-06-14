@@ -74,11 +74,16 @@ jobs:
         with:
           path: artifacts
 
-      # サードパーティアクションはサプライチェーン保護のため commit SHA でピンする
-      # （contents: write 権限を持つため）。タグ更新時は SHA も併せて見直す。
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          files: |
-            artifacts/macos-build/moviedl-macos.zip
+      # GitHub Release は gh CLI で作成する（第三者アクションを使わず、Node ランタイム
+      # 非推奨の影響を受けない）。release ジョブは checkout しないため --repo を明示する。
+      # タグ名はシェル展開の安全のため env 経由で渡す。
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --generate-notes \
+            artifacts/macos-build/moviedl-macos.zip \
             artifacts/windows-build/moviedl-windows.zip
-          generate_release_notes: true
