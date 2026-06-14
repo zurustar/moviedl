@@ -522,10 +522,10 @@ GitHub Actions で `v*` タグ push をトリガーに自動ビルドする。
 
 ffmpeg はバイナリに同梱しない（Windows も含む）。両プラットフォームとも `wails build` をそのまま実行する。Windows の ffmpeg はアプリ初回起動後に `InstallFfmpeg` で取得する（上記「ffmpeg」節を参照）。
 
-**サードパーティ GitHub Actions は commit SHA でピンする。** `softprops/action-gh-release` は
-`contents: write` 権限を持つため、タグ（`@v2`）参照ではタグ書き換えによるサプライチェーン攻撃に
-晒される。`@<40桁SHA> # v2` の形でピンし、タグ更新時は SHA も併せて見直す。公式 `actions/*` は任意。
-（2026-06-10 セキュリティ監査 T8）
+GitHub Release の作成は **`gh release create`（gh CLI、ランナー同梱）** で行い、第三者アクションを使わない。`GH_TOKEN: ${{ github.token }}` で認証し、release ジョブは checkout しないため `--repo "$GITHUB_REPOSITORY"` を明示する。タグ名は `env:` 経由で渡す（シェル展開の安全）。
+
+**サードパーティ GitHub Actions は commit SHA でピンする。** 第三者アクションを使う場合は `contents: write` 等の権限下でタグ書き換えによるサプライチェーン攻撃に晒されるため、`@<40桁SHA> # vN` の形でピンする。公式 `actions/*` は任意。
+（経緯: 2026-06-10 監査 T8 で `softprops/action-gh-release@v2` を SHA ピン化したが、同アクションが Node 20 ランタイム非推奨（2026-06-16 強制移行）に該当したため、後に `gh release create` へ置換し第三者アクション依存を解消した。）
 
 ---
 
