@@ -48,8 +48,27 @@
       margin-left: 8px;
     }
 
-    /* ウィンドウ全体がドロップ対象であることを示すハイライト */
-    body.dragover { outline: 2px dashed var(--accent); outline-offset: -8px; }
+    /* ドラッグ中だけウィンドウ全面・最前面に出すドロップ受けオーバーレイ。
+       ドロップ先を常にこの div に固定し、下のネイティブ部品（select/input 等）が
+       OS のドロップを受けて遷移する経路を物理的に塞ぐ。 */
+    #drop-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 2147483647;        /* 最前面 */
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(108, 99, 255, 0.12);
+      border: 3px dashed var(--accent);
+      color: var(--accent);
+      font-size: 16px;
+      font-weight: 600;
+      pointer-events: none;       /* 非ドラッグ時はクリックを透過 */
+    }
+    #drop-overlay.active {
+      display: flex;
+      pointer-events: auto;       /* ドラッグ中だけ全イベントを奪う */
+    }
 
     /* ---- banners ---- */
     .banner {
@@ -259,6 +278,8 @@
 </head>
 <body>
 
+  <div id="drop-overlay">ここにドロップして登録</div>
+
   <h1>moviedl<span class="version" id="app-version"></span></h1>
 
   <div id="ytdlp-banner" class="banner">
@@ -434,13 +455,20 @@
         .filter(s => s && !s.startsWith('#'));
     }
 
-    // ドロップはウィンドウ全体で受ける。入力欄に限定すると落とす位置がシビアになり、
-    // 欄の外に落とすと WebView の既定動作で URL へ遷移してしまう（別表示が開く）。
+    // ドラッグ&ドロップは「ドラッグ中だけウィンドウ全面・最前面に出すオーバーレイ」で受ける。
+    // capture フェーズで window 全体を抑止しても、ネイティブ部品（select/input）や WebView の
+    // ドロップ経路では遷移が残ることがある。オーバーレイを最前面に被せると、ドロップ先が常に
+    // この div になり、下の部品が OS のドロップを受ける経路を物理的に塞げる。
     // 詳細は aidlc-docs/inception/application-design/design.md「ドラッグ&ドロップ入力」を参照。
+    const dropOverlay = () => document.getElementById('drop-overlay');
+
+    function showDropOverlay() { dropOverlay().classList.add('active'); }
+    function hideDropOverlay() { dropOverlay().classList.remove('active'); }
+
     function handleDrop(event) {
       // URL を含まないドロップでも、まず既定の遷移を必ず止める。
       event.preventDefault();
-      document.body.classList.remove('dragover');
+      hideDropOverlay();
       const urls = parseDroppedURLs(event.dataTransfer);
       if (urls.length === 0) return;
       for (const u of urls) submitURL(u);
@@ -450,26 +478,22 @@
       // dragover で preventDefault を呼ばないと drop が発火せず、既定動作（遷移）になる。
       event.preventDefault();
       event.dataTransfer.dropEffect = 'copy';
-      document.body.classList.add('dragover');
+      showDropOverlay();
     }
 
     function handleDragEnter(event) {
-      // dragenter も抑止しておく。要素ごとの既定ドロップ処理に先んじて
-      // 「JS が受けるドロップ」だと宣言し、ネイティブ遷移の起点を潰す。
+      // 最初の dragenter で抑止しつつオーバーレイを前面化し、以降のドロップを div に集約する。
       event.preventDefault();
+      showDropOverlay();
     }
 
     function handleDragLeave(event) {
-      // ウィンドウ外に出たときだけハイライトを消す（子要素間の移動では消さない）。
-      if (event.relatedTarget === null) document.body.classList.remove('dragover');
+      // ウィンドウ外に出たときだけ消す（要素間の移動では消さない）。
+      if (event.relatedTarget === null) hideDropOverlay();
     }
 
-    // ウィンドウ全体をドロップ対象として登録する（入力欄個別の ondrop は付けない）。
-    // 第 3 引数 true（キャプチャフェーズ）が必須。バブリングだと window のハンドラが
-    // 「最後」に発火するため、URL テキストを表示する要素（エラー項目の .dl-title など）の
-    // 上では WebView がターゲットフェーズでネイティブ遷移を始めてしまい、preventDefault が
-    // 間に合わず別ウィンドウで URL が開く。キャプチャで要素より先に遷移を止める。
-    // 詳細は aidlc-docs/inception/application-design/design.md「ドラッグ&ドロップ入力」を参照。
+    // window 全体を capture フェーズで購読（要素より先に遷移を止める）。
+    // オーバーレイが前面に出た後はドロップ先がオーバーレイになるため二重の防御になる。
     window.addEventListener('dragenter', handleDragEnter, true);
     window.addEventListener('dragover', handleDragOver, true);
     window.addEventListener('drop', handleDrop, true);

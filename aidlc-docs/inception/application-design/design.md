@@ -328,14 +328,14 @@ func resumeProcess(cmd *exec.Cmd) error  { /* NtResumeProcess  */ }
 
 ### ドラッグ&ドロップ入力
 
-- **ウィンドウ全体を `drop` ターゲットにする。** `dragenter` / `dragover` / `drop` を `window`（document）レベルで購読する。
-  - **やってはいけないこと:** ドロップ受け口を URL 入力欄だけに付ける。落とす位置がシビアになり、欄の外に落とすと WebView の既定動作で**ドロップした URL へ遷移してしまう**（別表示が開く）。
-- **`window` の DnD ハンドラは必ずキャプチャフェーズで登録する**（`addEventListener(..., true)`）。
-  - **やってはいけないこと:** バブリングフェーズ（既定）で登録する。`window` のハンドラはバブリングだと「最後」に発火するため、URL テキストを表示している要素（とくにエラー項目の `.dl-title` は `d.title` が無く URL がそのまま出る）の上にドロップすると、WebView がターゲットフェーズでネイティブのリンク遷移を先に開始してしまい、`preventDefault()` が間に合わず**別ウィンドウでその URL が開く**。空白領域はネイティブのドロップ処理が無いためバブリングでも抑止できてしまい、「エラー項目の上だけ遷移する」という分かりにくい症状になる。キャプチャで要素より先に `preventDefault()` を効かせること。
-- `dragover` イベントで `preventDefault()` を呼び、ウィンドウ全体を有効なドロップターゲットとして登録する（`dropEffect = 'copy'`）。`dragenter` でも `preventDefault()` し、要素ごとの既定ドロップ処理の起点を潰す。
-- `drop` イベントで `event.preventDefault()` を**必ず**呼び、ブラウザのデフォルト動作（URL でのページ遷移・別表示）を抑止する。URL を含まないドロップでも遷移阻止のため preventDefault する。
-- ハンドラはウィンドウに一本化し、入力欄個別の `ondrop` は付けない（二重登録による重複処理を避ける）。
-- ドロップ位置に応じた視覚フィードバック（ウィンドウ全体のハイライト）を出してよい。
+- **ドラッグ中だけ最前面・ウィンドウ全面のオーバーレイ div でドロップを受ける。** これが最も確実。
+  - 仕組み: 既定は `display:none` / `pointer-events:none` の `#drop-overlay`（`position:fixed; inset:0; z-index` 最大）を用意し、`dragenter` / `dragover` で `active` クラスを付けて `display:flex` / `pointer-events:auto` にして前面化、`drop` と（ウィンドウ外への）`dragleave` で外す。
+  - **なぜオーバーレイが必要か（capture だけでは不十分）:** `window` のキャプチャ購読で `preventDefault()` しても、**ネイティブ部品（`<select>` プルダウン・`<input>` など）や WebView のドロップ経路**では、OS レベルのドロップがその部品へ先に渡り、HTML の `drop` を経ずにネイティブ遷移が起きる領域が残る。オーバーレイを最前面に被せると、ドラッグ中はカーソル下の要素が常にこのオーバーレイ div になり、ドロップ先がこの div に固定される＝下のネイティブ部品が OS のドロップを受ける経路を**物理的に塞げる**。
+  - **やってはいけないこと:** ドロップ受け口を URL 入力欄だけに付ける／オーバーレイ無しで個別要素の `drop` だけに頼る。落とす位置がシビアになり、欄外やネイティブ部品上で WebView の既定動作（ドロップ URL へ遷移＝別表示）が起きる。
+- **二重の防御として `window` の `dragenter`/`dragover`/`drop`/`dragleave` もキャプチャフェーズ（`addEventListener(..., true)`）で購読し `preventDefault()` する。** キャプチャは要素より先に発火するため、オーバーレイ前面化が間に合わない一瞬の取りこぼしも抑止できる。
+- `dragover` で `preventDefault()` を呼ばないと `drop` が発火せず既定動作（遷移）になる。`dropEffect = 'copy'`。`dragenter` でも `preventDefault()`。
+- `drop` で `event.preventDefault()` を**必ず**呼ぶ（URL を含まないドロップでも遷移阻止のため）。
+- ハンドラはウィンドウ／オーバーレイに一本化し、入力欄個別の `ondrop` は付けない（二重処理回避）。
 - ドロップデータの取得優先順位: `text/uri-list` → `text/plain`
 - `text/uri-list` は RFC 2483 に従い改行区切りで複数 URL を含み、`#` で始まる行はコメント。これらを除外する
 - `text/plain` も改行区切りで複数行入力を許容する
