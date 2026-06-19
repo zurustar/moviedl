@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>moviedl</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0f0f17;
+      --surface:  #1a1a2e;
+      --border:   #2a2a4a;
+      --accent:   #6c63ff;
+      --accent-h: #8077ff;
+      --text:     #e0e0f0;
+      --dim:      #7070a0;
+      --ok:       #4caf50;
+      --err:      #f44336;
+      --warn:     #ff9800;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
+      font-size: 14px;
+      padding: 20px;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    h1 {
+      font-size: 17px;
+      font-weight: 700;
+      color: var(--accent);
+      letter-spacing: .08em;
+      margin-bottom: 16px;
+      flex-shrink: 0;
+    }
+    h1 .version {
+      font-size: 11px;
+      font-weight: 400;
+      color: var(--dim);
+      letter-spacing: normal;
+      margin-left: 8px;
+    }
+
+    /* ドラッグ中だけウィンドウ全面・最前面に出すドロップ受けオーバーレイ。
+       ドロップ先を常にこの div に固定し、下のネイティブ部品（select/input 等）が
+       OS のドロップを受けて遷移する経路を物理的に塞ぐ。 */
+    #drop-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 2147483647;        /* 最前面 */
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(108, 99, 255, 0.12);
+      border: 3px dashed var(--accent);
+      color: var(--accent);
+      font-size: 16px;
+      font-weight: 600;
+      pointer-events: none;       /* 非ドラッグ時はクリックを透過 */
+    }
+    #drop-overlay.active {
+      display: flex;
+      pointer-events: auto;       /* ドラッグ中だけ全イベントを奪う */
+    }
+
+    /* ---- banners ---- */
+    .banner {
+      display: none;
+      align-items: center;
+      gap: 12px;
+      border-radius: 8px;
+      padding: 10px 14px;
+      margin-bottom: 12px;
+      flex-shrink: 0;
+    }
+    .banner span { flex: 1; font-size: 13px; }
+    #ytdlp-banner  { background: #2a1a1a; border: 1px solid #5a2a2a; }
+    #ytdlp-banner span { color: #f08080; }
+    #ffmpeg-banner { background: #1a1a2a; border: 1px solid #3a3a5a; }
+    #ffmpeg-banner span { color: #a0a0d0; }
+
+    /* ---- card ---- */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+      margin-bottom: 12px;
+      flex-shrink: 0;
+    }
+    .url-row { display: flex; gap: 8px; margin-bottom: 10px; }
+
+    input[type="text"] {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 8px 12px;
+      font-size: 14px;
+      outline: none;
+      transition: border-color .15s;
+    }
+    input[type="text"]:focus { border-color: var(--accent); }
+    input[type="text"]::placeholder { color: var(--dim); }
+
+    button {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 16px;
+      font-size: 14px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background .15s;
+    }
+    button:hover:not(:disabled) { background: var(--accent-h); }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button.sm { padding: 4px 10px; font-size: 12px; }
+    button.ghost {
+      background: transparent;
+      color: var(--dim);
+      border: 1px solid var(--border);
+      padding: 3px 9px;
+      font-size: 12px;
+      border-radius: 4px;
+      line-height: 1.4;
+    }
+    button.ghost:hover:not(:disabled) { background: transparent; color: var(--text); border-color: var(--text); }
+    button.ghost.pause:hover:not(:disabled) { color: var(--warn); border-color: var(--warn); }
+    button.ghost.cancel:hover:not(:disabled) { color: var(--err); border-color: var(--err); }
+    button.ghost.start { color: var(--ok); border-color: var(--ok); }
+    button.ghost.start:hover:not(:disabled) { color: var(--ok); border-color: var(--ok); background: rgba(76,175,80,.1); }
+
+    .dir-row { display: flex; align-items: center; gap: 8px; }
+    .dir-label { color: var(--dim); font-size: 12px; flex-shrink: 0; }
+    .dir-path { flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .concurrency-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+    .concurrency-row label { color: var(--dim); font-size: 12px; flex-shrink: 0; }
+    select {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 5px 10px;
+      font-size: 13px;
+      outline: none;
+      cursor: pointer;
+      transition: border-color .15s;
+    }
+    select:focus { border-color: var(--accent); }
+
+    /* ---- list ---- */
+    #downloads-wrap { flex: 1; overflow-y: auto; min-height: 0; }
+    .section-label {
+      font-size: 11px; color: var(--dim);
+      text-transform: uppercase; letter-spacing: .1em;
+      margin-bottom: 8px;
+    }
+
+    .dl-item {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      transition: border-color .2s;
+    }
+    .dl-item.finished   { border-color: #2a4a2a; }
+    .dl-item.error      { border-color: #4a2a2a; }
+    .dl-item.cancelled  { opacity: .5; }
+    .dl-item.queued     { opacity: .65; }
+    .dl-item.paused     { border-color: #4a3a1a; }
+    .dl-item.fetching   { border-color: #3a3a5a; opacity: .85; }
+    .dl-item.fetching .progress-fill {
+      width: 100% !important;
+      background: linear-gradient(90deg, transparent, var(--accent), transparent);
+      background-size: 200% 100%;
+      animation: fetching-shimmer 1.4s linear infinite;
+    }
+    @keyframes fetching-shimmer {
+      0%   { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+    .fetching-label { color: var(--accent); }
+
+    .dl-header { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+    .dl-title  { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .dl-actions { display: flex; gap: 4px; flex-shrink: 0; }
+
+    .progress-bar {
+      height: 4px; background: var(--border);
+      border-radius: 2px; overflow: hidden; margin-bottom: 6px;
+    }
+    .progress-fill {
+      height: 100%; border-radius: 2px;
+      background: var(--accent); transition: width .3s;
+    }
+    .dl-item.finished  .progress-fill { background: var(--ok); }
+    .dl-item.error     .progress-fill { background: var(--err); }
+    .dl-item.queued    .progress-fill { background: var(--border); }
+    .dl-item.cancelled .progress-fill { background: var(--border); }
+    .dl-item.paused    .progress-fill { background: var(--warn); }
+
+    .dl-meta { font-size: 11px; color: var(--dim); display: flex; flex-wrap: wrap; gap: 0 12px; }
+    .dl-meta .seg { white-space: nowrap; }
+    .ok   { color: var(--ok); }
+    .err  { color: var(--err); }
+    .paused-label { color: var(--warn); }
+    .cancelled-label { color: var(--dim); }
+
+    .empty { text-align: center; color: var(--dim); padding: 40px 0; font-size: 13px; }
+
+    #downloads-wrap::-webkit-scrollbar { width: 6px; }
+    #downloads-wrap::-webkit-scrollbar-track { background: transparent; }
+    #downloads-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    /* ---- playlist modal ---- */
+    .modal-overlay {
+      display: none;
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,.7);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      width: min(560px, 90vw);
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .modal h2 { font-size: 15px; font-weight: 600; }
+    .modal-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+    .modal-entry {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      cursor: pointer;
+      transition: border-color .15s;
+    }
+    .modal-entry:hover { border-color: var(--accent); }
+    .modal-entry.selected { border-color: var(--accent); background: rgba(108,99,255,.1); }
+    .modal-entry input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; flex-shrink: 0; cursor: pointer; }
+    .modal-entry-info { flex: 1; overflow: hidden; }
+    .modal-entry-title { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .modal-entry-dur { font-size: 11px; color: var(--dim); }
+    .modal-footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .modal-sel-count { font-size: 12px; color: var(--dim); }
+    .modal-btns { display: flex; gap: 8px; }
+    .btn-secondary {
+      background: transparent;
+      color: var(--dim);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 7px 14px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    .btn-secondary:hover { border-color: var(--text); color: var(--text); }
+  </style>
+</head>
+<body>
+
+  <div id="drop-overlay">ここにドロップして登録</div>
+
+  <h1>moviedl<span class="version" id="app-version"></span></h1>
+
+  <div id="ytdlp-banner" class="banner">
+    <span>yt-dlp が見つかりません。インストールが必要です。</span>
+    <button id="install-btn" onclick="installYtDlp()">インストール</button>
+  </div>
+
+  <div id="ffmpeg-banner" class="banner">
+    <span id="ffmpeg-msg"></span>
+    <button id="ffmpeg-install-btn" onclick="installFfmpeg()" style="display:none">インストール</button>
+  </div>
+
+  <div class="card">
+    <div class="url-row">
+      <input type="text" id="url-input" placeholder="動画の URL を入力（ウィンドウのどこにでもドラッグ&ドロップ可）…"
+             onkeydown="if(event.key==='Enter') addURL()" />
+      <button id="add-btn" onclick="addURL()">追加</button>
+    </div>
+    <div class="dir-row">
+      <span class="dir-label">保存先:</span>
+      <span class="dir-path" id="save-dir">読み込み中…</span>
+      <button class="sm" onclick="selectDir()">変更</button>
+    </div>
+    <div class="concurrency-row">
+      <label for="concurrency-select">同時ダウンロード数:</label>
+      <select id="concurrency-select" onchange="changeConcurrency()"></select>
+    </div>
+  </div>
+
+  <div id="downloads-wrap">
+    <div class="section-label">ダウンロード</div>
+    <div id="dl-list"><div class="empty">URL を入力してダウンロードを開始</div></div>
+  </div>
+
+  <!-- playlist selection modal -->
+  <div class="modal-overlay" id="playlist-modal">
+    <div class="modal">
+      <h2 id="modal-title">動画を選択</h2>
+      <div class="modal-list" id="modal-list"></div>
+      <div class="modal-footer">
+        <span class="modal-sel-count" id="modal-sel-count"></span>
+        <div class="modal-btns">
+          <button class="btn-secondary" onclick="closeModal()">キャンセル</button>
+          <button id="modal-add-btn" onclick="confirmPlaylist()">キューに追加</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    'use strict';
+
+    let saveDir = '';
+    const downloads = {};       // id → item
+    const downloadOrder = [];   // insertion order
+
+    let pendingEntries = [];    // playlist entries waiting for user selection
+    let pendingURL = '';        // original URL (single-video fallback)
+
+    // 取得中の URL を可視化するためのフロントエンドローカル状態。
+    // Go 側の DownloadItem.ID とは別の名前空間（"f1", "f2", ...）。
+    const fetching = {};        // fid → { url }
+    const fetchingOrder = [];
+    let fetchCounter = 0;
+
+    // プレイリスト選択モーダルは同時に 1 つしか開けないため、
+    // 並行取得の結果が複数プレイリストを返した場合のキュー。
+    const modalQueue = [];      // [entries, ...]
+    let modalOpen = false;
+
+    async function init() {
+      try {
+        try {
+          const v = await window.go.main.App.AppVersion();
+          if (v) document.getElementById('app-version').textContent = v;
+        } catch (_) { /* バージョン取得失敗は致命的ではない */ }
+
+        saveDir = await window.go.main.App.GetDefaultDir();
+        document.getElementById('save-dir').textContent = saveDir;
+
+        const ok = await window.go.main.App.CheckYtDlp();
+        if (!ok) document.getElementById('ytdlp-banner').style.display = 'flex';
+
+        const hasFfmpeg = await window.go.main.App.CheckFfmpeg();
+        if (!hasFfmpeg) {
+          const canInstall = await window.go.main.App.CanInstallFfmpeg();
+          document.getElementById('ffmpeg-msg').textContent =
+            canInstall
+              ? 'ffmpeg が見つかりません。高画質ダウンロードにはインストールが必要です。'
+              : await window.go.main.App.FfmpegInstallHint();
+          if (canInstall) {
+            document.getElementById('ffmpeg-install-btn').style.display = '';
+          }
+          document.getElementById('ffmpeg-banner').style.display = 'flex';
+        }
+
+        const sel = document.getElementById('concurrency-select');
+        const current = await window.go.main.App.GetMaxConcurrent();
+        for (let n = 1; n <= 10; n++) {
+          const opt = document.createElement('option');
+          opt.value = String(n);
+          opt.textContent = String(n);
+          if (n === current) opt.selected = true;
+          sel.appendChild(opt);
+        }
+      } catch (e) {
+        console.error('init:', e);
+      }
+    }
+
+    async function changeConcurrency() {
+      const n = parseInt(document.getElementById('concurrency-select').value, 10);
+      await window.go.main.App.SetMaxConcurrent(n);
+    }
+
+    async function selectDir() {
+      const dir = await window.go.main.App.SelectDirectory();
+      if (dir) {
+        saveDir = dir;
+        document.getElementById('save-dir').textContent = dir;
+      }
+    }
+
+    // submitURL: 単一 URL の登録処理。「追加」ボタン経路もドロップ経路もここを通る。
+    // 取得中プレースホルダーを表示し、Go 側 FetchPlaylist を非同期で呼び出す。
+    function submitURL(rawURL) {
+      const url = (rawURL || '').trim();
+      if (!url) return;
+
+      const fid = 'f' + (++fetchCounter);
+      fetching[fid] = { url };
+      fetchingOrder.push(fid);
+      render();
+
+      // Wails の IPC 呼び出しは goroutine で実行されるため、Go 側で並列化される。
+      (async () => {
+        try {
+          const entries = await window.go.main.App.FetchPlaylist(url);
+          if (entries.length === 1) {
+            await window.go.main.App.AddToQueue(entries[0].url, saveDir);
+          } else {
+            modalQueue.push(entries);
+            tryOpenNextModal();
+          }
+        } catch (e) {
+          alert('エラー: ' + e);
+        } finally {
+          delete fetching[fid];
+          const idx = fetchingOrder.indexOf(fid);
+          if (idx !== -1) fetchingOrder.splice(idx, 1);
+          render();
+        }
+      })();
+    }
+
+    function addURL() {
+      const input = document.getElementById('url-input');
+      const url = input.value.trim();
+      if (!url) return;
+      input.value = '';
+      submitURL(url);
+    }
+
+    // text/uri-list (RFC 2483) または text/plain から URL 候補を抽出する。
+    // 改行区切りの複数 URL に対応、'#' 始まりのコメント行は除外する。
+    function parseDroppedURLs(dt) {
+      let text = dt.getData('text/uri-list');
+      if (!text) text = dt.getData('text/plain');
+      if (!text) text = dt.getData('text');
+      if (!text) return [];
+      return text.split(/\r?\n/)
+        .map(s => s.trim())
+        .filter(s => s && !s.startsWith('#'));
+    }
+
+    // ドラッグ&ドロップは「ドラッグ中だけウィンドウ全面・最前面に出すオーバーレイ」で受ける。
+    // capture フェーズで window 全体を抑止しても、ネイティブ部品（select/input）や WebView の
+    // ドロップ経路では遷移が残ることがある。オーバーレイを最前面に被せると、ドロップ先が常に
+    // この div になり、下の部品が OS のドロップを受ける経路を物理的に塞げる。
+    // 詳細は aidlc-docs/inception/application-design/design.md「ドラッグ&ドロップ入力」を参照。
+    const dropOverlay = () => document.getElementById('drop-overlay');
+
+    function showDropOverlay() { dropOverlay().classList.add('active'); }
+    function hideDropOverlay() { dropOverlay().classList.remove('active'); }
+
+    function handleDrop(event) {
+      // URL を含まないドロップでも、まず既定の遷移を必ず止める。
+      event.preventDefault();
+      hideDropOverlay();
+      const urls = parseDroppedURLs(event.dataTransfer);
+      if (urls.length === 0) return;
+      for (const u of urls) submitURL(u);
+    }
+
+    function handleDragOver(event) {
+      // dragover で preventDefault を呼ばないと drop が発火せず、既定動作（遷移）になる。
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+      showDropOverlay();
+    }
+
+    function handleDragEnter(event) {
+      // 最初の dragenter で抑止しつつオーバーレイを前面化し、以降のドロップを div に集約する。
+      event.preventDefault();
+      showDropOverlay();
+    }
+
+    function handleDragLeave(event) {
+      // ウィンドウ外に出たときだけ消す（要素間の移動では消さない）。
+      if (event.relatedTarget === null) hideDropOverlay();
+    }
+
+    // window 全体を capture フェーズで購読（要素より先に遷移を止める）。
+    // オーバーレイが前面に出た後はドロップ先がオーバーレイになるため二重の防御になる。
+    window.addEventListener('dragenter', handleDragEnter, true);
+    window.addEventListener('dragover', handleDragOver, true);
+    window.addEventListener('drop', handleDrop, true);
+    window.addEventListener('dragleave', handleDragLeave, true);
+
+    function tryOpenNextModal() {
+      if (modalOpen || modalQueue.length === 0) return;
+      const entries = modalQueue.shift();
+      openModal(entries);
+    }
+
+    function openModal(entries) {
+      modalOpen = true;
+      pendingEntries = entries;
+      const list = document.getElementById('modal-list');
+      list.innerHTML = entries.map((e, i) => `
+        <label class="modal-entry selected" id="me-${i}">
+          <input type="checkbox" checked onchange="updateModalCount()" data-i="${i}" />
+          <div class="modal-entry-info">
+            <div class="modal-entry-title" title="${esc(e.title || e.url)}">${esc(e.title || e.url)}</div>
+            ${e.duration ? `<div class="modal-entry-dur">${esc(e.duration)}</div>` : ''}
+          </div>
+        </label>
+      `).join('');
+      updateModalCount();
+      document.getElementById('playlist-modal').classList.add('open');
+    }
+
+    function updateModalCount() {
+      const checks = document.querySelectorAll('#modal-list input[type=checkbox]');
+      let sel = 0;
+      checks.forEach((c, i) => {
+        sel += c.checked ? 1 : 0;
+        document.getElementById('me-' + i).classList.toggle('selected', c.checked);
+      });
+      document.getElementById('modal-sel-count').textContent = `${sel} / ${pendingEntries.length} 件選択中`;
+      document.getElementById('modal-add-btn').disabled = sel === 0;
+    }
+
+    function closeModal() {
+      document.getElementById('playlist-modal').classList.remove('open');
+      pendingEntries = [];
+      modalOpen = false;
+      tryOpenNextModal();
+    }
+
+    async function confirmPlaylist() {
+      const checks = document.querySelectorAll('#modal-list input[type=checkbox]');
+      const selected = [];
+      checks.forEach((c, i) => { if (c.checked) selected.push(pendingEntries[i]); });
+      closeModal();
+      for (const e of selected) {
+        await window.go.main.App.AddToQueue(e.url, saveDir);
+      }
+    }
+
+    async function startDownload(id) {
+      await window.go.main.App.StartDownload(id);
+    }
+
+    async function pauseDownload(id) {
+      await window.go.main.App.PauseDownload(id);
+    }
+
+    async function resumeDownload(id) {
+      await window.go.main.App.ResumeDownload(id);
+    }
+
+    async function cancelDownload(id) {
+      await window.go.main.App.CancelDownload(id);
+    }
+
+    async function retryDownload(id) {
+      await window.go.main.App.RetryDownload(id);
+    }
+
+    // copyURL: アイテムの元 URL をクリップボードへコピーする。
+    // WebView の navigator.clipboard は不安定なため Wails ランタイムを使う。
+    async function copyURL(id, btn) {
+      const d = downloads[id];
+      if (!d || !d.url) return;
+      try {
+        await window.runtime.ClipboardSetText(d.url);
+        if (btn) {
+          const orig = btn.textContent;
+          btn.textContent = '✓';
+          setTimeout(() => { btn.textContent = orig; }, 1000);
+        }
+      } catch (e) {
+        alert('URL のコピーに失敗しました: ' + e);
+      }
+    }
+
+    async function installYtDlp() {
+      const btn = document.getElementById('install-btn');
+      btn.textContent = 'インストール中…';
+      btn.disabled = true;
+      try {
+        await window.go.main.App.InstallYtDlp();
+        document.getElementById('ytdlp-banner').style.display = 'none';
+      } catch (e) {
+        btn.textContent = 'リトライ';
+        btn.disabled = false;
+        alert('インストール失敗: ' + e);
+      }
+    }
+
+    async function installFfmpeg() {
+      const btn = document.getElementById('ffmpeg-install-btn');
+      btn.textContent = 'インストール中…';
+      btn.disabled = true;
+      try {
+        await window.go.main.App.InstallFfmpeg();
+        document.getElementById('ffmpeg-banner').style.display = 'none';
+      } catch (e) {
+        btn.textContent = 'リトライ';
+        btn.disabled = false;
+        alert('ffmpeg インストール失敗: ' + e);
+      }
+    }
+
+    function render() {
+      const list = document.getElementById('dl-list');
+      const ids = downloadOrder.filter(id => downloads[id]);
+      const fids = fetchingOrder.filter(fid => fetching[fid]);
+
+      if (!ids.length && !fids.length) {
+        list.innerHTML = '<div class="empty">URL を入力してダウンロードを開始</div>';
+        return;
+      }
+
+      const queuedItems = ids.filter(id => downloads[id].status === 'queued');
+
+      const fetchingHTML = fids.map(fid => {
+        const f = fetching[fid];
+        return `<div class="dl-item fetching">
+          <div class="dl-header">
+            <div class="dl-title" title="${esc(f.url)}">${esc(f.url)}</div>
+          </div>
+          <div class="progress-bar"><div class="progress-fill"></div></div>
+          <div class="dl-meta"><span class="seg fetching-label">取得中…</span></div>
+        </div>`;
+      }).join('');
+
+      const downloadsHTML = ids.map(id => {
+        const d = downloads[id];
+        const label = d.title || d.url;
+        const pct = d.percent || 0;
+
+        // action buttons
+        let actions = '';
+        if (d.status === 'queued') {
+          actions = `
+            <button class="ghost start" onclick="startDownload('${esc(d.id)}')" title="今すぐ開始">▶</button>
+            <button class="ghost cancel" onclick="cancelDownload('${esc(d.id)}')" title="キャンセル">×</button>
+          `;
+        } else if (d.status === 'downloading') {
+          actions = `
+            <button class="ghost pause" onclick="pauseDownload('${esc(d.id)}')" title="一時停止">⏸</button>
+            <button class="ghost cancel" onclick="cancelDownload('${esc(d.id)}')" title="キャンセル">×</button>
+          `;
+        } else if (d.status === 'paused') {
+          actions = `
+            <button class="ghost start" onclick="resumeDownload('${esc(d.id)}')" title="再開">▶</button>
+            <button class="ghost cancel" onclick="cancelDownload('${esc(d.id)}')" title="キャンセル">×</button>
+          `;
+        } else if (d.status === 'error') {
+          actions = `
+            <button class="ghost start" onclick="retryDownload('${esc(d.id)}')" title="リトライ">⟳</button>
+            <button class="ghost cancel" onclick="cancelDownload('${esc(d.id)}')" title="リストから削除">×</button>
+          `;
+        }
+
+        // どの状態でも元 URL をコピーできるようにする（リトライで直らない場合の代替DL用）。
+        // URL はエスケープ事故を避けるため id 経由で参照する。
+        actions = `<button class="ghost" onclick="copyURL('${esc(d.id)}', this)" title="URL をコピー">⧉</button>` + actions;
+
+        // status text
+        let segs = [];
+        if (d.status === 'queued') {
+          const pos = queuedItems.indexOf(d.id) + 1;
+          segs.push(`<span class="seg">待機中 ${pos} / ${queuedItems.length}</span>`);
+        } else if (d.status === 'paused') {
+          segs.push(`<span class="seg paused-label">一時停止中</span>`);
+          segs.push(`<span class="seg">${pct.toFixed(1)}%</span>`);
+          if (d.totalSize) segs.push(`<span class="seg">${esc(d.totalSize)}</span>`);
+        } else if (d.status === 'finished') {
+          segs.push('<span class="seg ok">完了</span>');
+          if (d.totalSize) segs.push(`<span class="seg">${esc(d.totalSize)}</span>`);
+          if (d.elapsed)   segs.push(`<span class="seg">経過 ${esc(d.elapsed)}</span>`);
+        } else if (d.status === 'cancelled') {
+          segs.push('<span class="seg cancelled-label">キャンセル済み</span>');
+        } else if (d.status === 'error') {
+          segs.push(`<span class="seg err">エラー: ${esc(d.error || '不明')}</span>`);
+        } else {
+          // downloading
+          segs.push(`<span class="seg">${pct.toFixed(1)}%</span>`);
+          if (d.totalSize) segs.push(`<span class="seg">${esc(d.totalSize)}</span>`);
+          if (d.speed)     segs.push(`<span class="seg">${esc(d.speed)}</span>`);
+          if (d.eta)       segs.push(`<span class="seg">残り ${esc(d.eta)}</span>`);
+          if (d.elapsed)   segs.push(`<span class="seg">経過 ${esc(d.elapsed)}</span>`);
+        }
+
+        return `<div class="dl-item ${d.status}">
+          <div class="dl-header">
+            <div class="dl-title" title="${esc(label)}">${esc(label)}</div>
+            <div class="dl-actions">${actions}</div>
+          </div>
+          <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
+          <div class="dl-meta">${segs.join('')}</div>
+        </div>`;
+      }).join('');
+
+      list.innerHTML = fetchingHTML + downloadsHTML;
+    }
+
+    function esc(s) {
+      // & は最初に処理する。属性値は二重引用符で囲うが、将来 onclick="...('${esc(x)}')"
+      // のようにシングルクォート内へ動的値を埋めても壊れない / XSS にならないよう ' も escape する。
+      return String(s)
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+        .replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+        .replace(/'/g,'&#39;');
+    }
+
+    window.runtime.EventsOn('download:update', item => {
+      // error はリストに残してユーザーがリトライ・削除できるようにする。
+      // 自動削除は finished / cancelled のみ。詳細は aidlc-docs/inception/requirements/requirements.md「エラー時の挙動」。
+      const terminal = item.status === 'finished' || item.status === 'cancelled';
+      if (terminal) {
+        delete downloads[item.id];
+        const idx = downloadOrder.indexOf(item.id);
+        if (idx !== -1) downloadOrder.splice(idx, 1);
+      } else {
+        if (!downloads[item.id]) downloadOrder.push(item.id);
+        downloads[item.id] = item;
+      }
+      render();
+    });
+
+    window.addEventListener('load', () => setTimeout(init, 50));
+  </script>
+</body>
+</html>

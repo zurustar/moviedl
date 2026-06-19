@@ -1,0 +1,9 @@
+build/bin/
+.DS_Store
+*.swp
+moviedl
+.claude/settings.local.json
+.serena
+
+# 脆弱性・セキュリティ監査情報はリポジトリに公開しない（ローカル保持のみ）
+aidlc-docs/inception/plans/security-audit-*.md
