@@ -378,10 +378,12 @@
 
         const sel = document.getElementById('concurrency-select');
         const current = await window.go.main.App.GetMaxConcurrent();
-        for (let n = 1; n <= 10; n++) {
+        // 0 は「登録のみモード」（自動ダウンロードを開始しない）。既定値は Go 側の
+        // GetMaxConcurrent() が返す 0。requirements.md「同時ダウンロード数 0（登録のみモード）」参照。
+        for (let n = 0; n <= 10; n++) {
           const opt = document.createElement('option');
           opt.value = String(n);
-          opt.textContent = String(n);
+          opt.textContent = n === 0 ? '0（登録のみ）' : String(n);
           if (n === current) opt.selected = true;
           sel.appendChild(opt);
         }

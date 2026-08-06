@@ -19,5 +19,11 @@ jobs:
           go-version-file: go.mod
 
       # gofmt + go vet + staticcheck + go test（ローカルの make check と同一）
+      # RAPID_SEED は PBT（pgregory.net/rapid）の PRNG シード。実行ごとに変わるが
+      # run_id としてログに残るため、失敗時に同じシードで再現できる（PBT-08）。
       - name: make check
-        run: make check
+        env:
+          RAPID_SEED: ${{ github.run_id }}
+        run: |
+          echo "RAPID_SEED=$RAPID_SEED (再現: go test -rapid.seed=$RAPID_SEED ./...)"
+          make check

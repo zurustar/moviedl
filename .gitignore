@@ -5,5 +5,8 @@ moviedl
 .claude/settings.local.json
 .serena
 
+# rapid（PBT）が失敗時に書き出す再現用ファイル。ローカル調査用でコミットしない
+testdata/rapid/
+
 # 脆弱性・セキュリティ監査情報はリポジトリに公開しない（ローカル保持のみ）
 aidlc-docs/inception/plans/security-audit-*.md

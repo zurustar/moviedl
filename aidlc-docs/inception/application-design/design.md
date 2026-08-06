@@ -156,11 +156,13 @@ type App struct {
     mu        sync.Mutex
     items     []*DownloadItem  // 登録順に並ぶ単一リスト
     schedCh   chan struct{}     // 状態変化通知用（バッファ 1）
-    maxActive int               // 自動補充で維持する実行中アイテム数の上限（1〜10、既定 1）
+    maxActive int               // 自動補充で維持する実行中アイテム数の上限（0〜10、既定 0）
 }
 ```
 
-`maxActive` は `mu` で保護する。`SetMaxConcurrent(n int)` で更新（1〜10 にクランプ）したのち `notify()` で scheduler を起こす。`GetMaxConcurrent() int` でフロントエンドの初期値を返す。
+`maxActive` は `mu` で保護する。`SetMaxConcurrent(n int)` で更新（**0〜10 にクランプ**）したのち `notify()` で scheduler を起こす。`GetMaxConcurrent() int` でフロントエンドの初期値を返す。
+
+**既定値は 0（`NewApp` で `maxActive: 0`）。** 設定は永続化しないため、起動するたびに 0 に戻る。起動直後は自動補充が行われず、ユーザーがプルダウンで 1 以上を選ぶか手動開始するまでダウンロードは始まらない。
 
 `DownloadItem.Status` の取り得る値:
 
@@ -190,6 +192,35 @@ items を先頭から走査し、active < maxActive である限り
 **注意:** 起動対象のアイテムは `mu` ロック下で `"downloading"` に確定させてから、ロックを解放した上で `runDownload` goroutine を起動すること。1 回の通知で複数件を起動しうるため、スライスにためてからまとめて起動する。ロック保持中に goroutine を起動したり `emit` を呼んだりしない（`runDownload` 冒頭でも `mu` を取るためデッドロックの原因になる）。
 
 手動開始（`StartDownload`）は `maxActive` の制約を受けない。設定値を超えて並行ダウンロードを開始できる。
+
+### maxActive == 0（登録のみモード）
+
+`maxActive == 0` は「自動補充を一切行わない」状態を表す。要件は [requirements.md「同時ダウンロード数 0（登録のみモード）」](../requirements/requirements.md) を参照。
+
+**実装上のポイント:**
+
+- `selectToStart` は先頭の `if active >= maxActive { break }` により、`maxActive == 0` なら `active == 0` でも即 break して `nil` を返す。**0 のための特別分岐を追加してはいけない。** 一般ルール（`active < maxActive` の間だけ補充）がそのまま 0 を包含しており、分岐を足すと二重の真実源になる
+- 抑止するのは **scheduler による自動起動だけ**。`AddToQueue` / `FetchVideoInfo` / プレイリスト一覧取得 / 重複チェック / `StartDownload`（手動開始）/ `ResumeDownload` は `maxActive` を参照しないので、0 でもそのまま動作する。**これらの経路に `maxActive == 0` のガードを入れてはいけない**（要件で明示的に許可されている）
+- 0 に切り替えても実行中のアイテムは停止させない。scheduler は「起動する」方向にしか作用しないため、`SetMaxConcurrent(0)` は `notify()` を送るだけで実行中には何も起きない。これは引き下げ全般（例: 5 → 2）と同じ挙動で、**意図的な設計**である
+- 0 → 1 以上に引き上げたときは `SetMaxConcurrent` 末尾の `notify()` により待ちキューから即座に補充される（既存の引き上げ経路と同一）
+
+**なぜ既定を 0 にするか:** 起動直後に前回のキューが勝手に走り出すのを避け、ユーザーが明示的に開始するまで何も始まらない状態を既定にするため。したがって `NewApp` の `maxActive` を 1 に戻してはいけない。
+
+### テスト可能プロパティ（PBT-01）
+
+Property-Based Testing 拡張（opt-in / Full 強制）に基づき、`maxActive` 周りのテスト可能プロパティを以下のとおり特定する。PBT フレームワークは **`pgregory.net/rapid`**（PBT-09。カスタムジェネレータ・自動 shrink・シード再現に対応し `go test` に統合される）。
+
+| 対象 | カテゴリ | プロパティ |
+|---|---|---|
+| `SetMaxConcurrent` | Invariant（範囲制約） | 任意の `int` 入力に対し、適用後の `GetMaxConcurrent()` は常に `0 <= n <= 10` |
+| `SetMaxConcurrent` | Invariant（恒等） | `0 <= n <= 10` の入力はクランプされずそのまま保持される |
+| `SetMaxConcurrent` | Idempotence | `Set(n); Set(n)` の結果は `Set(n)` と同じ（クランプは冪等） |
+| `selectToStart` | Oracle（件数の参照計算） | 返り値の件数は常に `min(queued 件数, max(0, maxActive - downloading 件数))` |
+| `selectToStart` | Invariant（範囲制約） | `downloading 件数 + len(返り値) <= max(maxActive, downloading 件数)`。とくに `maxActive == 0` では常に空 |
+| `selectToStart` | Invariant（要素保存） | 返り値は入力に含まれる `"queued"` アイテムのみで、入力順を保つ |
+| `selectToStart` | Invariant（副作用なし） | 呼び出し前後で全アイテムの `Status` が変化しない |
+
+ジェネレータは `[]*DownloadItem` を「実在する `Status` 値のみ」から生成する専用ジェネレータを用意する（PBT-07。生の文字列を `Status` に入れない）。PBT は例示ベーステストを置き換えず併存させる（PBT-10）。ファイルは `pbt_test.go` に分離する。
 
 ### キュー登録（AddToQueue）と重複防止
 

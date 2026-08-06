@@ -29,7 +29,7 @@ type App struct {
 	mu        sync.Mutex
 	items     []*DownloadItem
 	schedCh   chan struct{}
-	maxActive int // 自動補充で維持する実行中アイテム数の上限（1〜10）
+	maxActive int // 自動補充で維持する実行中アイテム数の上限（0〜10、既定 0 = 登録のみモード）
 }
 
 type DownloadItem struct {
@@ -67,16 +67,20 @@ var dlCounter int64
 
 func NewApp() *App {
 	return &App{
-		schedCh:   make(chan struct{}, 1),
-		maxActive: 1,
+		schedCh: make(chan struct{}, 1),
+		// 既定は 0（登録のみモード）。起動直後に前回分が勝手に走り出さないようにする。
+		// design.md「maxActive == 0（登録のみモード）」参照。1 に戻してはいけない。
+		maxActive: 0,
 	}
 }
 
-// SetMaxConcurrent は自動補充で維持する実行中アイテム数の上限を設定する（1〜10 にクランプ）。
+// SetMaxConcurrent は自動補充で維持する実行中アイテム数の上限を設定する（0〜10 にクランプ）。
+// 0 は「自動補充を一切行わない（登録のみモード）」を意味する。
 // 設定後に scheduler を起こし、引き上げ時は待ちキューから即座に補充させる。
+// 引き下げ（0 への切り替えを含む）で実行中のアイテムを停止させることはない。
 func (a *App) SetMaxConcurrent(n int) {
-	if n < 1 {
-		n = 1
+	if n < 0 {
+		n = 0
 	}
 	if n > 10 {
 		n = 10

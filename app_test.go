@@ -358,3 +358,36 @@ func TestFormatDuration(t *testing.T) {
 		}
 	}
 }
+
+// 仕様: aidlc-docs/inception/application-design/design.md「maxActive == 0（登録のみモード）」
+// 例示ベーステスト（PBT-10 により pbt_test.go のプロパティテストと併存させる）。
+func TestSetMaxConcurrent(t *testing.T) {
+	cases := []struct {
+		name string
+		in   int
+		want int
+	}{
+		{"0 は登録のみモードとして保持する", 0, 0},
+		{"負値は 0 にクランプ", -1, 0},
+		{"下限より十分小さい負値も 0", -100, 0},
+		{"1 はそのまま", 1, 1},
+		{"10 はそのまま", 10, 10},
+		{"上限超過は 10 にクランプ", 11, 10},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := NewApp()
+			a.SetMaxConcurrent(c.in)
+			if got := a.GetMaxConcurrent(); got != c.want {
+				t.Errorf("SetMaxConcurrent(%d) 後の GetMaxConcurrent() = %d, want %d", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// 起動直後は自動ダウンロードを始めない（既定 0 = 登録のみモード）。
+func TestNewAppDefaultsToRegistrationOnly(t *testing.T) {
+	if got := NewApp().GetMaxConcurrent(); got != 0 {
+		t.Errorf("NewApp() の maxActive = %d, want 0（起動時は登録のみモード）", got)
+	}
+}
