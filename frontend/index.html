@@ -307,6 +307,11 @@
       <label for="concurrency-select">同時ダウンロード数:</label>
       <select id="concurrency-select" onchange="changeConcurrency()"></select>
     </div>
+    <div class="dir-row">
+      <span class="dir-label">yt-dlp:</span>
+      <span class="dir-path" id="ytdlp-version">確認中…</span>
+      <button class="sm" id="ytdlp-update-btn" onclick="updateYtDlp()">更新</button>
+    </div>
   </div>
 
   <div id="downloads-wrap">
@@ -362,6 +367,7 @@
 
         const ok = await window.go.main.App.CheckYtDlp();
         if (!ok) document.getElementById('ytdlp-banner').style.display = 'flex';
+        refreshYtDlpVersion(); // 非同期。yt-dlp --version の完了を待たずに初期化を進める
 
         const hasFfmpeg = await window.go.main.App.CheckFfmpeg();
         if (!hasFfmpeg) {
@@ -596,10 +602,59 @@
       try {
         await window.go.main.App.InstallYtDlp();
         document.getElementById('ytdlp-banner').style.display = 'none';
+        await refreshYtDlpVersion();
       } catch (e) {
         btn.textContent = 'リトライ';
         btn.disabled = false;
         alert('インストール失敗: ' + e);
+      }
+    }
+
+    async function refreshYtDlpVersion() {
+      const el = document.getElementById('ytdlp-version');
+      try {
+        const v = await window.go.main.App.GetYtDlpVersion();
+        el.textContent = v ? v : '未インストール';
+      } catch (e) {
+        el.textContent = '不明';
+      }
+    }
+
+    // yt-dlp の手動更新。自動チェックは行わない。
+    // requirements.md「yt-dlp の更新」/ design.md「yt-dlp の更新（UpdateYtDlp）」参照。
+    async function updateYtDlp() {
+      const btn = document.getElementById('ytdlp-update-btn');
+
+      // 停止によって影響が出る場合のみ確認する（影響ゼロなら確認なしで更新）。
+      try {
+        const impact = await window.go.main.App.YtDlpUpdateImpact();
+        if (impact.items > 0 || impact.otherProcs > 0) {
+          const lines = ['yt-dlp を更新するため、実行中の処理を停止します。'];
+          if (impact.items > 0) {
+            lines.push(`・ダウンロード ${impact.items} 件を停止します（進捗は保持されず、最初からやり直しになります）`);
+          }
+          if (impact.otherProcs > 0) {
+            lines.push(`・情報取得中の処理 ${impact.otherProcs} 件を停止します`);
+          }
+          lines.push('', '続行しますか？');
+          if (!confirm(lines.join('\n'))) return;
+        }
+      } catch (e) {
+        alert('更新の確認に失敗しました: ' + e);
+        return;
+      }
+
+      btn.textContent = '更新中…';
+      btn.disabled = true;
+      try {
+        await window.go.main.App.UpdateYtDlp();
+        await refreshYtDlpVersion();
+        document.getElementById('ytdlp-banner').style.display = 'none';
+      } catch (e) {
+        alert('yt-dlp の更新に失敗しました: ' + e);
+      } finally {
+        btn.textContent = '更新';
+        btn.disabled = false;
       }
     }
 

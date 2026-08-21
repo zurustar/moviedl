@@ -91,3 +91,39 @@
 **Context**: CONSTRUCTION - Build and Test（完了・承認待ち）
 
 ---
+
+## リリース（v0.2.1）
+**Timestamp**: 2026-08-06T00:00:00Z
+**User Input**: "大丈夫そうなんでコミットしてリリースして"
+**AI Response**: "バージョン（v0.2.1）とコミット先（main 直接）を確認のうえ、35c8767 を main へ push し v0.2.1 タグを push。CI 成功、Release ワークフロー成功（moviedl-macos.zip / moviedl-windows.zip 公開）。build/windows/ は Wails 生成物かつ本変更と無関係のためコミットに含めなかった旨を報告。"
+**Context**: 🟡 OPERATIONS - リリース完了
+
+---
+
+## 新規要件（yt-dlp の更新）— 提起と実現性の議論
+**Timestamp**: 2026-08-06T00:00:00Z
+**User Input**: "このソフトウェアはダウンロード機能を持った外部ライブラリに強く依存していると思います。実質はそのライブラリのラッパーです。ということは、このツール以上にそのライブラリを定期的にアップデートするのが大事だと思うんです。それが事実ならば、そのライブラリをアップデートする機能が必要だと思いませんか？またmac版はバイナリに内包していますが、これも内包しないほうがいいってことになりませんかね？"
+**AI Response**: "前半に同意し、実装を確認して欠落を提示（InstallYtDlp は latest 取得 + SHA256 照合 + 原子的 rename を既に持つが、バナーが未インストール時のみ表示されるため更新の起点がない／バージョン表示も新版チェックもない）。後半の前提は誤りである旨を事実で訂正（go:embed はフロントエンド資産のみ。yt-dlp は全 OS で os.UserConfigDir()/moviedl へダウンロード、macOS の ffmpeg は Homebrew 参照。既に非内包であり、それが更新機能を実装できる理由でもある）。Windows で実行中 exe を上書きできない制約と、退避リネーム方式という代替案を提示。"
+**Context**: INCEPTION - Requirements Analysis（新規要件の意図分析）
+
+---
+
+## 新規要件（yt-dlp の更新）— 方式の決定
+**Timestamp**: 2026-08-06T00:00:00Z
+**User Input**: "今回は手動でいいし、自動的にチェックする必要もありません。アップデートを指示されたらそのプログラムを停止すればいいと思うんですけど、それで実現可能ですか？"
+**AI Response**: "実現可能と回答。ただし (1) 一時停止はサスペンドでプロセスが生きており .exe を掴むため停止対象に含める必要がある、(2) FetchPlaylist / STEP2a のタイトル取得も yt-dlp を起こすが Go 側で追跡されていない、(3) workDir が毎回破棄されるため停止したダウンロードは 0% からやり直しになる、の 3 点を事実として提示。選択肢（退避リネーム方式 / 停止してから更新）を提示。"
+**User Answers (AskUserQuestion)**:
+- 更新方式 = `停止してから更新`
+- 確認ダイアログ = `必要（影響がある場合のみ）`
+**AI Response**: "回答に基づき requirements.md「yt-dlp の更新」節と design.md「yt-dlp の更新（UpdateYtDlp）」節を作成。手動のみ・自動チェックなし・影響ありのときのみ確認・停止は登録簿ベースで全経路・ダウンロードと検証の成功後に停止（ネットワーク失敗で進捗を失わせない）・更新完了後に queued へ戻す、を明文化。取得中プロセスが Go 側で追跡されていない実装ギャップに対し yt-dlp プロセス登録簿の導入を設計に追加。"
+**Context**: INCEPTION - Requirements Analysis Step 7（要件・設計文書作成）→ 承認待ち
+
+---
+
+## 新規要件（yt-dlp の更新）— 承認と実装
+**Timestamp**: 2026-08-22T00:00:00Z
+**User Input**: "それで良いです"
+**AI Response**: "要件・設計を承認と解釈し Code Generation（TDD 6 サイクル）を実施。実装中に 2 つの非自明な事象を発見し design.md へ追記: (1) runDownload 末尾の『error 以外は削除』判定により、更新のため再キューしたアイテムが消えるバグを予防（shouldRemoveWhenDone に切り出し queued も残す）、(2) Kill された yt-dlp の Wait エラーが error 扱いになるため DownloadItem.stopFlag を追加。requeueStopped から resetForRequeue を切り出し、emit（Wails ctx 必須）に触れず単体テストできるようにした。PBT 9 件を追加し合計 16 件。make check 成功。"
+**Context**: CONSTRUCTION - Code Generation（完了）→ 手動確認待ち
+
+---

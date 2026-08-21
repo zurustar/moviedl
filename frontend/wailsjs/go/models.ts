@@ -20,6 +20,20 @@ export namespace main {
 	        this.duration = source["duration"];
 	    }
 	}
+	export class UpdateImpact {
+	    items: number;
+	    otherProcs: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new UpdateImpact(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.items = source["items"];
+	        this.otherProcs = source["otherProcs"];
+	    }
+	}
 
 }
 

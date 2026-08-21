@@ -3,7 +3,9 @@
 ## Project Information
 - **Project Type**: Brownfield
 - **Start Date**: 2026-08-06T00:00:00Z
-- **Current Stage**: CONSTRUCTION - Build and Test（完了・承認待ち）
+- **Current Stage**: CONSTRUCTION - Code Generation 完了（要件 2「yt-dlp の更新」・手動確認待ち）
+- **完了済み要件**: 要件 1「同時ダウンロード数 0（登録のみモード）」→ v0.2.1 としてリリース済み（commit 35c8767）
+- **要件 2 の成果物**: [code-generation-plan-ytdlp-update.md](construction/plans/code-generation-plan-ytdlp-update.md)（TDD 6 サイクル・手動確認チェックリスト付き）
 
 ## Workspace State
 - **Existing Code**: Yes

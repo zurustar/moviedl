@@ -30,6 +30,14 @@ type App struct {
 	items     []*DownloadItem
 	schedCh   chan struct{}
 	maxActive int // 自動補充で維持する実行中アイテム数の上限（0〜10、既定 0 = 登録のみモード）
+
+	// procs は生存している yt-dlp プロセスの登録簿。yt-dlp を起こす「すべての」
+	// exec.Command が registerProc / unregisterProc を通る必要がある。
+	// 1 箇所でも漏れると UpdateYtDlp がそのプロセスを止められない。
+	// design.md「停止対象は『実行中』だけでは足りない」参照。
+	procs map[*exec.Cmd]struct{}
+	// updating が true の間は yt-dlp の新規起動を拒否する（実行ファイル置き換え中の起動を防ぐ）。
+	updating bool
 }
 
 type DownloadItem struct {
@@ -48,11 +56,22 @@ type DownloadItem struct {
 	cmd        *exec.Cmd
 	startedAt  time.Time
 	cancelFlag int32 // atomic: 1 = cancelled
+	// stopFlag は yt-dlp 更新のために停止されたことを表す（atomic: 1 = 更新のため停止）。
+	// これがないと Kill された yt-dlp の Wait エラーが "error" 扱いになってしまう。
+	stopFlag int32
 }
 
 func (item *DownloadItem) markCancelled() { atomic.StoreInt32(&item.cancelFlag, 1) }
 func (item *DownloadItem) isCancelled() bool {
 	return atomic.LoadInt32(&item.cancelFlag) == 1
+}
+
+func (item *DownloadItem) markStoppedForUpdate() { atomic.StoreInt32(&item.stopFlag, 1) }
+func (item *DownloadItem) clearStoppedForUpdate() {
+	atomic.StoreInt32(&item.stopFlag, 0)
+}
+func (item *DownloadItem) isStoppedForUpdate() bool {
+	return atomic.LoadInt32(&item.stopFlag) == 1
 }
 
 type PlaylistEntry struct {
@@ -71,7 +90,50 @@ func NewApp() *App {
 		// 既定は 0（登録のみモード）。起動直後に前回分が勝手に走り出さないようにする。
 		// design.md「maxActive == 0（登録のみモード）」参照。1 に戻してはいけない。
 		maxActive: 0,
+		procs:     make(map[*exec.Cmd]struct{}),
 	}
+}
+
+// registerProc は yt-dlp プロセスを登録簿に載せる。yt-dlp を起こす直前に呼ぶ。
+// 更新中は false を返すので、呼び出し側は起動せずに中止しなければならない。
+func (a *App) registerProc(cmd *exec.Cmd) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.updating {
+		return false
+	}
+	a.procs[cmd] = struct{}{}
+	return true
+}
+
+// unregisterProc はプロセス終了後に登録簿から外す。registerProc が true を
+// 返した経路では必ず（defer で）呼ぶこと。
+func (a *App) unregisterProc(cmd *exec.Cmd) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.procs, cmd)
+}
+
+// liveProcCount は生存している yt-dlp プロセス数を返す。
+func (a *App) liveProcCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.procs)
+}
+
+// beginUpdate / endUpdate は yt-dlp 実行ファイルの置き換え区間を囲む。
+// この間は registerProc が false を返し、新規の yt-dlp 起動が止まる。
+func (a *App) beginUpdate() {
+	a.mu.Lock()
+	a.updating = true
+	a.mu.Unlock()
+}
+
+func (a *App) endUpdate() {
+	a.mu.Lock()
+	a.updating = false
+	a.mu.Unlock()
+	a.notify()
 }
 
 // SetMaxConcurrent は自動補充で維持する実行中アイテム数の上限を設定する（0〜10 にクランプ）。
@@ -428,6 +490,20 @@ func (a *App) InstallYtDlp() error {
 	if err != nil {
 		return err
 	}
+	tmpName, err := downloadYtDlpVerified(path)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmpName) //nolint:errcheck // rename 成功後は no-op、失敗時は掃除
+	return placeYtDlp(tmpName, path)
+}
+
+// downloadYtDlpVerified は最新の yt-dlp を一時ファイルへ取得し、SHA256 照合まで済ませて
+// その一時ファイルのパスを返す。**最終パスには何も書かない**ため、この関数が失敗しても
+// 既存の yt-dlp は無傷である。呼び出し側は成功時に placeYtDlp で配置し、
+// いずれの場合も os.Remove で一時ファイルを掃除する責務を持つ。
+// 一時ファイルは destPath と同じディレクトリに作る（同一 FS 内なので rename が原子的になる）。
+func downloadYtDlpVerified(destPath string) (string, error) {
 	var assetName string
 	switch goruntime.GOOS {
 	case "darwin":
@@ -444,48 +520,270 @@ func (a *App) InstallYtDlp() error {
 	// 期待ダイジェストを先に取得する
 	wantSum, err := fetchExpectedSum(client, base+"SHA2-256SUMS", assetName)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	// バイナリを一時ファイルへストリーム保存しつつ SHA256 を計算する
 	resp, err := client.Get(base + assetName)
 	if err != nil {
-		return fmt.Errorf("ダウンロード失敗: %w", err)
+		return "", fmt.Errorf("ダウンロード失敗: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("ダウンロード失敗: HTTP %d", resp.StatusCode)
+		return "", fmt.Errorf("ダウンロード失敗: HTTP %d", resp.StatusCode)
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(path), "yt-dlp-dl-*")
+	tmp, err := os.CreateTemp(filepath.Dir(destPath), "yt-dlp-dl-*")
 	if err != nil {
-		return fmt.Errorf("一時ファイル作成失敗: %w", err)
+		return "", fmt.Errorf("一時ファイル作成失敗: %w", err)
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName) //nolint:errcheck // rename 成功後は no-op、失敗時は掃除
 
 	h := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(tmp, h), resp.Body); err != nil {
-		tmp.Close() //nolint:errcheck
-		return fmt.Errorf("書き込み失敗: %w", err)
+		tmp.Close()        //nolint:errcheck
+		os.Remove(tmpName) //nolint:errcheck
+		return "", fmt.Errorf("書き込み失敗: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		os.Remove(tmpName) //nolint:errcheck
+		return "", err
 	}
 
-	// 検証前の実体を最終パスに置かない: 一致を確認してから rename する
+	// 検証前の実体を最終パスに置かない: 一致を確認してから配置する
 	gotSum := hex.EncodeToString(h.Sum(nil))
 	if !strings.EqualFold(gotSum, wantSum) {
-		return fmt.Errorf("チェックサム不一致（破損または改竄の可能性）: want=%s got=%s", wantSum, gotSum)
+		os.Remove(tmpName) //nolint:errcheck
+		return "", fmt.Errorf("チェックサム不一致（破損または改竄の可能性）: want=%s got=%s", wantSum, gotSum)
 	}
+	return tmpName, nil
+}
 
+// placeYtDlp は検証済みの一時ファイルを最終パスへ原子的に配置する。
+// Windows では実行中の .exe を上書きできないため、呼び出し側は事前にすべての
+// yt-dlp プロセスを停止しておく責務を持つ（design.md「yt-dlp の更新（UpdateYtDlp）」）。
+func placeYtDlp(tmpName, destPath string) error {
 	if err := os.Chmod(tmpName, 0o755); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := os.Rename(tmpName, destPath); err != nil {
 		return fmt.Errorf("配置失敗: %w", err)
 	}
 	return nil
+}
+
+// stopTarget は更新のために停止する 1 アイテムを表す。
+type stopTarget struct {
+	item *DownloadItem
+	// cmd はロック内で退避した item.cmd。STEP2a のタイトル取得中など、
+	// アイテムに紐づくコマンドがまだ設定されていない場合は nil になる。
+	cmd *exec.Cmd
+	// needsResume はサスペンド中（一時停止）を表す。SIGSTOP 中のプロセスは
+	// SIGKILL を受け取れないため、resume してから Kill する必要がある。
+	needsResume bool
+}
+
+// planStop は更新のために停止すべきアイテムを、リストの順序を保って返す。
+// 状態は変更しない（変更は呼び出し側の責務）。
+// item.cmd を読むため **呼び出し側が a.mu を保持していること**。
+// design.md「停止対象は『実行中』だけでは足りない」参照。
+func planStop(items []*DownloadItem) []stopTarget {
+	var out []stopTarget
+	for _, it := range items {
+		switch it.Status {
+		case "downloading":
+			out = append(out, stopTarget{item: it, cmd: it.cmd})
+		case "paused":
+			out = append(out, stopTarget{item: it, cmd: it.cmd, needsResume: true})
+		}
+	}
+	return out
+}
+
+// UpdateImpact は更新時に停止される対象の内訳。確認ダイアログの文面に使う。
+type UpdateImpact struct {
+	// Items は停止して 0% からやり直しになるダウンロード数。
+	Items int `json:"items"`
+	// OtherProcs は情報取得中など、アイテムに紐づかない生存プロセス数。
+	OtherProcs int `json:"otherProcs"`
+}
+
+// Affected は確認ダイアログを出すべきかを返す。
+func (u UpdateImpact) Affected() bool { return u.Items > 0 || u.OtherProcs > 0 }
+
+// computeUpdateImpact は影響の内訳を計算する。liveProcs は登録簿の生存プロセス数。
+// アイテム 1 件が必ず 1 プロセスとは対応しない（STEP2a 中は item.cmd 未設定）ため、
+// 差分は 0 で下限を切る。
+func computeUpdateImpact(items []*DownloadItem, liveProcs int) UpdateImpact {
+	affected := len(planStop(items))
+	other := liveProcs - affected
+	if other < 0 {
+		other = 0
+	}
+	return UpdateImpact{Items: affected, OtherProcs: other}
+}
+
+// parseYtDlpVersion は `yt-dlp --version` の出力から version 文字列を取り出す。
+func parseYtDlpVersion(out []byte) string {
+	s := strings.TrimSpace(string(out))
+	if s == "" {
+		return ""
+	}
+	return strings.TrimSpace(strings.SplitN(s, "\n", 2)[0])
+}
+
+// GetYtDlpVersion はインストール済み yt-dlp のバージョンを返す（未インストール・
+// 取得失敗時は空文字）。更新したかどうかをユーザーが確認できるようにするための表示用。
+func (a *App) GetYtDlpVersion() string {
+	ytdlp, err := a.ytDlpPath()
+	if err != nil {
+		return ""
+	}
+	if info, err := os.Stat(ytdlp); err != nil || info.Size() == 0 {
+		return ""
+	}
+	cmd := exec.Command(ytdlp, "--version")
+	applyOSProcAttr(cmd)
+	if !a.registerProc(cmd) { // 更新中は起動しない
+		return ""
+	}
+	defer a.unregisterProc(cmd)
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return parseYtDlpVersion(out)
+}
+
+// YtDlpUpdateImpact は更新前に停止される対象の内訳を返す（確認ダイアログ用）。
+func (a *App) YtDlpUpdateImpact() UpdateImpact {
+	a.mu.Lock()
+	impact := computeUpdateImpact(a.items, len(a.procs))
+	a.mu.Unlock()
+	return impact
+}
+
+// procDrainTimeout は停止指示後にプロセスの終了を待つ上限。
+const procDrainTimeout = 10 * time.Second
+
+// UpdateYtDlp は yt-dlp を最新版へ更新する。手動実行のみで、自動チェックは行わない。
+//
+// **手順の順序が要件である。** ダウンロードと SHA256 検証が成功してから停止・置き換えを行う。
+// 先に停止するとネットワーク失敗時にユーザーの進捗だけが失われて何も得られない。
+// 詳細は aidlc-docs/inception/application-design/design.md「yt-dlp の更新（UpdateYtDlp）」を参照。
+func (a *App) UpdateYtDlp() error {
+	path, err := a.ytDlpPath()
+	if err != nil {
+		return err
+	}
+
+	// STEP 1: 新版を取得して検証する。ここまでは既存環境への影響ゼロ。
+	tmpName, err := downloadYtDlpVerified(path)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmpName) //nolint:errcheck // 配置成功後は no-op、失敗時は掃除
+
+	// STEP 2: 更新区間に入る。以降 registerProc が false を返し、新規 yt-dlp 起動が止まる。
+	a.beginUpdate()
+	defer a.endUpdate() // 解除時に notify するので、戻したアイテムはここで自動補充される
+
+	// STEP 3: 生存している yt-dlp をすべて停止する。
+	a.mu.Lock()
+	targets := planStop(a.items)
+	a.mu.Unlock()
+	for _, t := range targets {
+		t.item.markStoppedForUpdate() // Wait エラーを "error" ではなく再キュー扱いにする
+	}
+	stopTargets(targets)
+	a.killRegisteredProcs() // アイテムに紐づかない情報取得プロセスの取りこぼしを防ぐ
+
+	// STEP 4: プロセスが消えるのを待ってから配置する（Windows は実行中 .exe を上書き不可）。
+	if !a.waitProcsDrained(procDrainTimeout) {
+		a.requeueStopped(targets)
+		return fmt.Errorf("実行中の yt-dlp が終了しないため更新を中止しました。しばらく待って再度お試しください")
+	}
+	placeErr := placeYtDlp(tmpName, path)
+
+	// STEP 5: 停止したアイテムを待ちキューへ戻す。**配置後に行うこと**。
+	// 先に戻すと scheduler が置き換え前の古いバイナリで再開してしまう。
+	a.requeueStopped(targets)
+	return placeErr
+}
+
+// stopTargets は planStop が選んだアイテムのプロセスを停止する。
+// サスペンド中は SIGKILL を受け取れないため resume してから Kill する
+// （CancelDownload と同じ順序）。
+func stopTargets(targets []stopTarget) {
+	for _, t := range targets {
+		if t.cmd == nil || t.cmd.Process == nil {
+			continue
+		}
+		if t.needsResume {
+			resumeProcess(t.cmd) //nolint:errcheck
+		}
+		t.cmd.Process.Kill() //nolint:errcheck
+	}
+}
+
+// killRegisteredProcs は登録簿にあるすべての yt-dlp プロセスを Kill する。
+// FetchPlaylist / STEP2a のタイトル取得はアイテム経由で停止できないため、
+// これが取りこぼしを防ぐ backstop になる。
+func (a *App) killRegisteredProcs() {
+	a.mu.Lock()
+	cmds := make([]*exec.Cmd, 0, len(a.procs))
+	for c := range a.procs {
+		cmds = append(cmds, c)
+	}
+	a.mu.Unlock()
+	for _, c := range cmds {
+		if c.Process != nil {
+			c.Process.Kill() //nolint:errcheck
+		}
+	}
+}
+
+// waitProcsDrained は登録簿が空になるまで待ち、空になれば true を返す。
+func (a *App) waitProcsDrained(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if a.liveProcCount() == 0 {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// requeueStopped は停止したアイテムを待ちキューへ戻す。進捗は保持されないため
+// 表示もリセットする（再開ではなく再実行になる。requirements.md に明記済み）。
+func (a *App) requeueStopped(targets []stopTarget) {
+	a.mu.Lock()
+	for _, t := range targets {
+		resetForRequeue(t.item)
+	}
+	a.mu.Unlock()
+	for _, t := range targets {
+		a.emit(t.item)
+	}
+}
+
+// resetForRequeue は停止したアイテムを待ちキューへ戻す状態遷移。
+// 進捗は引き継げないため表示もリセットする（workDir は実行ごとに破棄されるので
+// 再開ではなく再実行になる。RetryDownload と同じ初期化を行う）。
+// 呼び出し側が a.mu を保持していること。
+func resetForRequeue(item *DownloadItem) {
+	item.Status = "queued"
+	item.Error = ""
+	item.Percent = 0
+	item.Speed = ""
+	item.ETA = ""
+	item.Elapsed = ""
+	item.TotalSize = ""
+	item.cmd = nil
+	item.clearStoppedForUpdate()
 }
 
 // fetchExpectedSum は SHA2-256SUMS を取得し、assetName 行の期待ダイジェストを返す。
@@ -544,6 +842,12 @@ func (a *App) FetchPlaylist(rawURL string) ([]PlaylistEntry, error) {
 	)
 	cmd.Env = append(os.Environ(), "PYTHONUTF8=1", "PYTHONIOENCODING=utf-8")
 	applyOSProcAttr(cmd)
+
+	// 登録簿を通す（UpdateYtDlp がこのプロセスを停止できるようにするため）。
+	if !a.registerProc(cmd) {
+		return nil, fmt.Errorf("yt-dlp を更新中です。完了後に再度お試しください")
+	}
+	defer a.unregisterProc(cmd)
 
 	out, err := cmd.Output()
 	if err != nil {
@@ -867,25 +1171,33 @@ func (a *App) runDownload(item *DownloadItem) {
 		titleCmd.Env = ytdlpEnv
 		titleCmd.Stderr = &titleStderr
 		applyOSProcAttr(titleCmd)
-		if out, err := titleCmd.Output(); err == nil {
-			logf("[STEP2a] dump-json: %d bytes, stderr=%q", len(out), strings.TrimSpace(titleStderr.String()))
-			firstLine := strings.TrimSpace(strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0])
-			var dumpInfo struct {
-				ID    string `json:"id"`
-				Title string `json:"title"`
-			}
-			if jerr := json.Unmarshal([]byte(firstLine), &dumpInfo); jerr == nil && dumpInfo.Title != "" {
-				title := stripDedupSuffix(dumpInfo.ID, dumpInfo.Title)
-				if title != dumpInfo.Title {
-					logf("[STEP2a] dedup suffix stripped (raw id=%q)", dumpInfo.ID)
-				}
-				item.Title = title
-				logf("[STEP2a] pre-fetched title: %q", title)
-			} else {
-				logf("[STEP2a] json parse error: %v", jerr)
-			}
+		// 登録簿を通してから起動する。更新中は起動せず事前取得を諦める
+		// （タイトルは STEP4 の info.json で補える）。
+		if !a.registerProc(titleCmd) {
+			logf("[STEP2a] skipped: yt-dlp 更新中のため起動しない")
 		} else {
-			logf("[STEP2a] dump-json failed: %v, stderr=%q", err, strings.TrimSpace(titleStderr.String()))
+			out, err := titleCmd.Output()
+			a.unregisterProc(titleCmd) // 短命なので defer せず即座に外す（生存数を正確に保つため）
+			if err == nil {
+				logf("[STEP2a] dump-json: %d bytes, stderr=%q", len(out), strings.TrimSpace(titleStderr.String()))
+				firstLine := strings.TrimSpace(strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0])
+				var dumpInfo struct {
+					ID    string `json:"id"`
+					Title string `json:"title"`
+				}
+				if jerr := json.Unmarshal([]byte(firstLine), &dumpInfo); jerr == nil && dumpInfo.Title != "" {
+					title := stripDedupSuffix(dumpInfo.ID, dumpInfo.Title)
+					if title != dumpInfo.Title {
+						logf("[STEP2a] dedup suffix stripped (raw id=%q)", dumpInfo.ID)
+					}
+					item.Title = title
+					logf("[STEP2a] pre-fetched title: %q", title)
+				} else {
+					logf("[STEP2a] json parse error: %v", jerr)
+				}
+			} else {
+				logf("[STEP2a] dump-json failed: %v, stderr=%q", err, strings.TrimSpace(titleStderr.String()))
+			}
 		}
 	}
 
@@ -902,6 +1214,18 @@ func (a *App) runDownload(item *DownloadItem) {
 	cmd.Dir = workDir
 	cmd.Env = append(os.Environ(), "PYTHONUTF8=1", "PYTHONIOENCODING=utf-8")
 	applyOSProcAttr(cmd)
+
+	// 登録簿を通してから起動する。更新中は起動せず待ちキューへ戻し、
+	// 更新完了時の notify で再開させる（エラーにはしない）。
+	if !a.registerProc(cmd) {
+		logf("[STEP2] yt-dlp 更新中のため待ちキューへ戻す")
+		a.mu.Lock()
+		item.Status = "queued"
+		a.mu.Unlock()
+		a.emit(item)
+		return
+	}
+	defer a.unregisterProc(cmd)
 
 	a.mu.Lock()
 	item.cmd = cmd
@@ -941,6 +1265,13 @@ func (a *App) runDownload(item *DownloadItem) {
 	if err := cmd.Wait(); err != nil {
 		if item.isCancelled() {
 			item.Status = "cancelled"
+		} else if item.isStoppedForUpdate() {
+			// yt-dlp 更新のために Kill された。エラーではなく待ちキューへ戻す扱いにする
+			// （UpdateYtDlp が配置完了後に requeueStopped で状態を確定させる）。
+			item.Status = "queued"
+			item.Error = ""
+			item.clearStoppedForUpdate()
+			logf("[STEP3] stopped for yt-dlp update -> requeued")
 		} else if item.Status != "finished" {
 			item.Status = "error"
 			item.Error = err.Error()
@@ -1005,11 +1336,21 @@ func (a *App) runDownload(item *DownloadItem) {
 		logDirContents(lf, "outputDir after download", item.outputDir)
 	}
 	a.emit(item)
-	// エラー終了したアイテムはリストに残す（ユーザーがリトライまたは明示的に削除できるように）。
-	// 詳細は aidlc-docs/inception/application-design/design.md「エラー終了したアイテムの扱い」を参照。
-	if item.Status != "error" {
+	if shouldRemoveWhenDone(item.Status) {
 		a.removeItem(item.ID)
 	}
+}
+
+// shouldRemoveWhenDone は runDownload 終了時にアイテムをリストから取り除くべきかを返す。
+//
+// 残す状態:
+//   - "error": ユーザーがリトライ・URL コピー・明示的な削除をできるように残す
+//     （design.md「エラー終了したアイテムの扱い」）
+//   - "queued": yt-dlp 更新のために停止して待ちキューへ戻したアイテムがここを通る。
+//     取り除くと再開できるはずのアイテムが消える
+//     （design.md「yt-dlp の更新（UpdateYtDlp）」）
+func shouldRemoveWhenDone(status string) bool {
+	return status != "error" && status != "queued"
 }
 
 // RetryDownload はエラー終了したアイテムを再キューする。

@@ -22,6 +22,8 @@ export function GetDefaultDir():Promise<string>;
 
 export function GetMaxConcurrent():Promise<number>;
 
+export function GetYtDlpVersion():Promise<string>;
+
 export function InstallFfmpeg():Promise<void>;
 
 export function InstallYtDlp():Promise<void>;
@@ -37,3 +39,7 @@ export function SelectDirectory():Promise<string>;
 export function SetMaxConcurrent(arg1:number):Promise<void>;
 
 export function StartDownload(arg1:string):Promise<void>;
+
+export function UpdateYtDlp():Promise<void>;
+
+export function YtDlpUpdateImpact():Promise<main.UpdateImpact>;

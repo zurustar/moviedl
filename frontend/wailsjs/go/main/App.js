@@ -42,6 +42,10 @@ export function GetMaxConcurrent() {
   return window['go']['main']['App']['GetMaxConcurrent']();
 }
 
+export function GetYtDlpVersion() {
+  return window['go']['main']['App']['GetYtDlpVersion']();
+}
+
 export function InstallFfmpeg() {
   return window['go']['main']['App']['InstallFfmpeg']();
 }
@@ -72,4 +76,12 @@ export function SetMaxConcurrent(arg1) {
 
 export function StartDownload(arg1) {
   return window['go']['main']['App']['StartDownload'](arg1);
+}
+
+export function UpdateYtDlp() {
+  return window['go']['main']['App']['UpdateYtDlp']();
+}
+
+export function YtDlpUpdateImpact() {
+  return window['go']['main']['App']['YtDlpUpdateImpact']();
 }
