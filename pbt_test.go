@@ -13,7 +13,9 @@ package main
 
 import (
 	"os/exec"
+	"strings"
 	"testing"
+	"time"
 
 	"pgregory.net/rapid"
 )
@@ -436,6 +438,275 @@ func TestPropProcRegistryCountsCorrectly(t *testing.T) {
 		}
 		if got := a.liveProcCount(); got != 0 {
 			t.Fatalf("全解除後の生存数 = %d, want 0", got)
+		}
+	})
+}
+
+// --- m3u8（HLS）対応のプロパティ ---
+// 仕様: design.md「m3u8 / HLS」テスト可能プロパティ（PBT-01）
+//
+// 追加した純粋関数はいずれも「任意の URL 文字列」を入力に取る。そのため
+// URL の構成要素（スキーム・ホスト・ポート・パス要素・クエリ）から
+// **構造的に妥当な URL を組み立てる専用ジェネレータ**を用意する（PBT-07）。
+// 生の文字列をそのまま URL として渡すジェネレータは使わない。
+
+// genHost は妥当なホスト名を生成する。
+func genHost() *rapid.Generator[string] {
+	return rapid.Custom(func(t *rapid.T) string {
+		labels := rapid.SliceOfN(rapid.StringMatching(`[a-z][a-z0-9-]{0,7}`), 1, 3).Draw(t, "labels")
+		tld := rapid.SampledFrom([]string{"com", "net", "jp", "example"}).Draw(t, "tld")
+		return strings.Join(append(labels, tld), ".")
+	})
+}
+
+// genAuthority はホスト（+ 任意のポート）を生成する。
+func genAuthority() *rapid.Generator[string] {
+	return rapid.Custom(func(t *rapid.T) string {
+		host := genHost().Draw(t, "host")
+		if rapid.Bool().Draw(t, "hasPort") {
+			return host + ":" + rapid.SampledFrom([]string{"80", "443", "8080", "1935"}).Draw(t, "port")
+		}
+		return host
+	})
+}
+
+// genPathSegments はパス要素を生成する。汎用語（hls など）も混ぜて、
+// 「末尾から汎用語を飛ばす」ロジックが働く入力を作る（PBT-07: 境界ケースの混入）。
+func genPathSegments() *rapid.Generator[[]string] {
+	seg := rapid.OneOf(
+		rapid.StringMatching(`[a-z0-9_-]{1,10}`),
+		rapid.SampledFrom([]string{"hls", "stream", "streams", "media", "vod", "playlist", "HLS", "Stream"}),
+	)
+	return rapid.SliceOfN(seg, 0, 4)
+}
+
+// genQueryToken は有効期限トークン風の値を生成する。パス要素の文字集合（小文字・数字）と
+// 衝突しないよう**大文字のみ**にして、「クエリ由来の文字が結果に混ざっていない」ことを
+// 誤検知なく検証できるようにする。
+func genQueryToken() *rapid.Generator[string] {
+	return rapid.StringMatching(`[A-Z]{8,16}`)
+}
+
+// genM3U8URL はパスが .m3u8 で終わる妥当な URL を組み立てる。
+// 第 2 戻り値はクエリを除いた同じ URL（クエリ非依存性の検証に使う）。
+func drawM3U8URL(t *rapid.T) (withQuery, withoutQuery, token string) {
+	scheme := rapid.SampledFrom([]string{"http", "https"}).Draw(t, "scheme")
+	auth := genAuthority().Draw(t, "authority")
+	segs := genPathSegments().Draw(t, "segments")
+	base := rapid.SampledFrom([]string{"master", "index", "playlist", "chunklist", "media"}).Draw(t, "base")
+	ext := rapid.SampledFrom([]string{".m3u8", ".M3U8", ".M3u8"}).Draw(t, "ext")
+
+	path := "/" + strings.Join(append(segs, base+ext), "/")
+	withoutQuery = scheme + "://" + auth + path
+
+	token = genQueryToken().Draw(t, "token")
+	withQuery = withoutQuery + "?token=" + token + "&exp=1789944255"
+	return withQuery, withoutQuery, token
+}
+
+// genAdversarialURLish は refererFor に渡される可能性のある敵対的な入力を生成する。
+// 引数インジェクション対策（design.md「引数インジェクション対策（-- 終端は必須）」）が
+// 任意の入力で成り立つことを確かめるため、妥当な URL と不正な文字列を混ぜる。
+func genAdversarialURLish() *rapid.Generator[string] {
+	return rapid.Custom(func(t *rapid.T) string {
+		switch rapid.IntRange(0, 3).Draw(t, "kind") {
+		case 0:
+			w, _, _ := drawM3U8URL(t)
+			return w
+		case 1:
+			// m3u8 ではない妥当な URL
+			auth := genAuthority().Draw(t, "authority")
+			return "https://" + auth + "/watch?v=" + rapid.StringMatching(`[a-z0-9]{1,8}`).Draw(t, "v")
+		case 2:
+			// yt-dlp のオプションに化けうる文字列
+			return rapid.SampledFrom([]string{
+				"--exec=touch /tmp/pwned.m3u8", "-J", "--config-location=/etc/evil.conf",
+				"--referer=http://evil/", "-o-", "file:///tmp/a.m3u8", "", "   ",
+			}).Draw(t, "hostile")
+		default:
+			// スキームやホストを欠いた入力
+			return rapid.SampledFrom([]string{
+				"example.com/a.m3u8", "https://", "https:///a.m3u8", "//e.com/a.m3u8", "a.m3u8",
+			}).Draw(t, "malformed")
+		}
+	})
+}
+
+// プロパティ（クエリ非依存）: クエリを足しても isM3U8URL の判定は変わらない。
+// 生文字列の HasSuffix で実装すると必ず落ちるプロパティ。
+func TestPropIsM3U8URLIgnoresQuery(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		withQuery, withoutQuery, _ := drawM3U8URL(rt)
+		if !isM3U8URL(withoutQuery) {
+			rt.Fatalf("クエリなしで m3u8 と判定されない: %q", withoutQuery)
+		}
+		if !isM3U8URL(withQuery) {
+			rt.Fatalf("クエリ付きで m3u8 と判定されない: %q", withQuery)
+		}
+	})
+}
+
+// プロパティ（引数インジェクション）: refererFor は任意の入力に対して "-" 始まりを返さない。
+func TestPropRefererForNeverStartsWithDash(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		in := genAdversarialURLish().Draw(rt, "input")
+		got := refererFor(in)
+		if strings.HasPrefix(got, "-") {
+			rt.Fatalf("refererFor(%q) = %q: '-' 始まりは yt-dlp のオプションに化ける", in, got)
+		}
+	})
+}
+
+// プロパティ（対応関係）: 非空を返すのは isM3U8URL が真のときだけ。
+// 崩れると m3u8 以外にも Referer が付き、既存サイトの経路の挙動を変えてしまう（デグレ）。
+func TestPropRefererForOnlyForM3U8(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		in := genAdversarialURLish().Draw(rt, "input")
+		if got, want := refererFor(in) != "", isM3U8URL(in); got != want {
+			rt.Fatalf("refererFor(%q) の非空判定 = %v, isM3U8URL = %v", in, got, want)
+		}
+	})
+}
+
+// プロパティ（オリジンのみ）: 戻り値はスキームとオーソリティだけで、パス・クエリ・フラグメントを含まない。
+func TestPropRefererForIsOriginOnly(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		withQuery, _, token := drawM3U8URL(rt)
+		got := refererFor(withQuery)
+		if got == "" {
+			rt.Fatalf("m3u8 URL なのに空: %q", withQuery)
+		}
+		if strings.ContainsAny(got, "?#") {
+			rt.Fatalf("refererFor(%q) = %q にクエリ/フラグメントが含まれる", withQuery, got)
+		}
+		if strings.Contains(got, token) {
+			rt.Fatalf("refererFor(%q) = %q にトークンが含まれる", withQuery, got)
+		}
+		// "scheme://authority/" の形（末尾スラッシュより後ろにパスがない）
+		if n := strings.Count(strings.TrimPrefix(got, "http://"), "/"); n != 1 {
+			if n := strings.Count(strings.TrimPrefix(got, "https://"), "/"); n != 1 {
+				rt.Fatalf("refererFor(%q) = %q はオリジンの形ではない", withQuery, got)
+			}
+		}
+	})
+}
+
+// プロパティ（安全なファイル名）: 生成名はそのままファイル名として使える。
+func TestPropM3U8FileNameIsSafeFilename(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		withQuery, _, _ := drawM3U8URL(rt)
+		now := time.Unix(int64(rapid.IntRange(0, 2_000_000_000).Draw(rt, "unix")), 0).UTC()
+		got := m3u8FileName(withQuery, now)
+		if got == "" {
+			rt.Fatalf("m3u8 URL なのに保存名が空: %q", withQuery)
+		}
+		if s := sanitizeFilename(got); s != got {
+			rt.Fatalf("m3u8FileName(%q) = %q は sanitizeFilename で %q に変わる", withQuery, got, s)
+		}
+		if strings.ContainsAny(got, `/\:*?"<>|`) {
+			rt.Fatalf("m3u8FileName(%q) = %q に禁止文字が含まれる", withQuery, got)
+		}
+	})
+}
+
+// プロパティ（クエリ非依存 + 機微情報）: 保存名はクエリに依存せず、トークンを含まない。
+func TestPropM3U8FileNameExcludesQuery(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		withQuery, withoutQuery, token := drawM3U8URL(rt)
+		now := time.Unix(int64(rapid.IntRange(0, 2_000_000_000).Draw(rt, "unix")), 0).UTC()
+		a, b := m3u8FileName(withQuery, now), m3u8FileName(withoutQuery, now)
+		if a != b {
+			rt.Fatalf("保存名がクエリに依存している: withQuery=%q withoutQuery=%q", a, b)
+		}
+		if strings.Contains(a, token) {
+			rt.Fatalf("m3u8FileName(%q) = %q にトークンが漏れている", withQuery, a)
+		}
+	})
+}
+
+// プロパティ（冪等）: redactLine は二重適用しても結果が変わらない。
+// ログ経路が増えて二重に通っても壊れないことを保証する。
+func TestPropRedactLineIdempotent(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		line := genLogLine().Draw(rt, "line")
+		once := redactLine(line)
+		if twice := redactLine(once); twice != once {
+			rt.Fatalf("冪等でない: line=%q once=%q twice=%q", line, once, twice)
+		}
+	})
+}
+
+// プロパティ（マスクの網羅）: クエリ付き URL を含む行を通すと、トークンが出力に残らない。
+func TestPropRedactLineMasksToken(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		withQuery, _, token := drawM3U8URL(rt)
+		prefix := rapid.SampledFrom([]string{
+			"", "[STEP2] command: yt-dlp -- ", "[STEP3] yt-dlp: [download] Destination: ",
+			"ERROR: Unable to download webpage: ",
+		}).Draw(rt, "prefix")
+		got := redactLine(prefix + withQuery)
+		if strings.Contains(got, token) {
+			rt.Fatalf("redactLine(%q) = %q にトークンが残っている", prefix+withQuery, got)
+		}
+		if !strings.Contains(got, redactedQuery) {
+			rt.Fatalf("redactLine(%q) = %q がマスクされていない", prefix+withQuery, got)
+		}
+	})
+}
+
+// genLogLine は URL を含む行・含まない行の両方を生成する。
+func genLogLine() *rapid.Generator[string] {
+	return rapid.Custom(func(t *rapid.T) string {
+		switch rapid.IntRange(0, 2).Draw(t, "kind") {
+		case 0:
+			w, _, _ := drawM3U8URL(t)
+			return rapid.SampledFrom([]string{"", "cmd -- ", "ERROR: "}).Draw(t, "prefix") + w
+		case 1:
+			_, wo, _ := drawM3U8URL(t)
+			return "no query: " + wo
+		default:
+			return rapid.SampledFrom([]string{
+				"[download]  45.3% of   10.00MiB at    1.50MiB/s ETA 00:03",
+				"[hlsnative] Total fragments: 3", "", "   ", "no url here at all",
+			}).Draw(t, "plain")
+		}
+	})
+}
+
+// プロパティ（保存）: URL を含まない行は一切変化しない。
+func TestPropRedactLinePreservesLinesWithoutURL(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		// URL になりえない文字集合だけで組んだ行
+		line := rapid.StringMatching(`[a-zA-Z0-9 .%\[\]:/-]{0,60}`).Draw(rt, "line")
+		if strings.Contains(line, "http") {
+			rt.Skip("URL を含みうる行はこのプロパティの対象外")
+		}
+		if got := redactLine(line); got != line {
+			rt.Fatalf("URL を含まない行が変化した: in=%q out=%q", line, got)
+		}
+	})
+}
+
+// --- プロセスツリー停止のプロパティ ---
+// 仕様: design.md「プロセス管理（停止は孫プロセスまで及ばせる）」テスト可能プロパティ（PBT-01）
+
+// プロパティ（範囲制約）: 任意の int に対し、停止対象として受理するのは pid > 1 のときだけ。
+// 0 / 1 / 負数を 1 件でも受理すると kill(0,...) や kill(-1,...) が成立し、
+// 無関係なプロセス（アプリ自身を含む）を殺しうる。
+func TestPropIsKillablePIDRejectsDangerousValues(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		pid := rapid.OneOf(
+			rapid.IntRange(-5, 5), // 危険な境界を厚めに
+			rapid.Int(),           // 極端な値
+			rapid.IntRange(2, 1<<22),
+		).Draw(rt, "pid")
+
+		if got, want := isKillablePID(pid), pid > 1; got != want {
+			rt.Fatalf("isKillablePID(%d) = %v, want %v", pid, got, want)
+		}
+		// 反転して安全に使えるのは受理された場合だけ、を明示的に確認する。
+		if isKillablePID(pid) && -pid >= -1 {
+			rt.Fatalf("pid=%d を受理したが -pid=%d は危険な値（-1 以上）", pid, -pid)
 		}
 	})
 }

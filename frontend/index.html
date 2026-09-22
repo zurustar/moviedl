@@ -85,6 +85,8 @@
     #ytdlp-banner span { color: #f08080; }
     #ffmpeg-banner { background: #1a1a2a; border: 1px solid #3a3a5a; }
     #ffmpeg-banner span { color: #a0a0d0; }
+    #m3u8-banner   { background: #2a2413; border: 1px solid #5a4a1a; }
+    #m3u8-banner span { color: #e0b858; }
 
     /* ---- card ---- */
     .card {
@@ -292,6 +294,13 @@
     <button id="ffmpeg-install-btn" onclick="installFfmpeg()" style="display:none">インストール</button>
   </div>
 
+  <!-- m3u8 の URL は有効期限トークン付きが多く、待ちキューに寝かせている間に失効する。
+       同時ダウンロード数が 0（登録のみ）のときだけ注意する。requirements.md「期限切れ URL」参照。 -->
+  <div id="m3u8-banner" class="banner">
+    <span>m3u8 の URL は有効期限が切れることがあります。同時ダウンロード数が「0（登録のみ）」のままだと、待っている間に失効してダウンロードできなくなる場合があります。すぐ開始することをおすすめします。</span>
+    <button class="sm" onclick="dismissM3U8Notice()">閉じる</button>
+  </div>
+
   <div class="card">
     <div class="url-row">
       <input type="text" id="url-input" placeholder="動画の URL を入力（ウィンドウのどこにでもドラッグ&ドロップ可）…"
@@ -401,6 +410,34 @@
     async function changeConcurrency() {
       const n = parseInt(document.getElementById('concurrency-select').value, 10);
       await window.go.main.App.SetMaxConcurrent(n);
+      // 1 以上にしたなら注意の前提が消えるので引っ込める。
+      if (n >= 1) dismissM3U8Notice();
+    }
+
+    function dismissM3U8Notice() {
+      const el = document.getElementById('m3u8-banner');
+      if (el) el.style.display = 'none';
+    }
+
+    // m3u8 の URL は有効期限トークン付きが多く、待ちキューに寝かせている間に失効する。
+    // 同時ダウンロード数が 0（登録のみ）のときだけ注意を出す。
+    //
+    // 判定は Go の isM3U8URL に一本化する（IsM3U8URL 経由）。ここで `.m3u8` の文字列判定を
+    // 書くと述語が二重化し、クエリ付き URL の扱いで食い違う。
+    // design.md「判定は 1 つの述語に集約する」/ requirements.md「期限切れ URL」を参照。
+    //
+    // 非同期のまま呼び、await で登録処理をブロックしない（ドロップ経路を止めないため）。
+    async function noticeIfM3U8WhileIdle(url) {
+      try {
+        const sel = document.getElementById('concurrency-select');
+        if (!sel || parseInt(sel.value, 10) !== 0) return;
+        if (!(await window.go.main.App.IsM3U8URL(url))) return;
+        const el = document.getElementById('m3u8-banner');
+        if (el) el.style.display = 'flex';
+      } catch (e) {
+        // 注意表示の失敗で登録を妨げない。
+        console.error('m3u8 notice:', e);
+      }
     }
 
     async function selectDir() {
@@ -416,6 +453,9 @@
     function submitURL(rawURL) {
       const url = (rawURL || '').trim();
       if (!url) return;
+
+      // 期限切れの注意は登録をブロックしない（await しない）。
+      noticeIfM3U8WhileIdle(url);
 
       const fid = 'f' + (++fetchCounter);
       fetching[fid] = { url };

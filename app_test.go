@@ -37,6 +37,458 @@ func TestIsValidURL(t *testing.T) {
 	}
 }
 
+// 仕様: aidlc-docs/inception/application-design/design.md「判定は 1 つの述語に集約する（isM3U8URL）」
+// パスが .m3u8 で終わるかを判定する。クエリ文字列は判定に含めない。
+func TestIsM3U8URL(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		// 正常系
+		{"https://vod.example.com/hls/ab12cd/master.m3u8", true},
+		{"http://example.com/media.m3u8", true},
+		{"  https://example.com/a.m3u8  ", true}, // 前後空白はトリムされる
+
+		// クエリ付きでも判定は変わらない（生文字列の HasSuffix では落ちる）
+		{"https://example.com/master.m3u8?token=abc123", true},
+		{"https://example.com/master.m3u8?a=1&b=2", true},
+
+		// 大小無視
+		{"https://example.com/MASTER.M3U8", true},
+		{"https://example.com/Master.M3u8", true},
+
+		// m3u8 ではない
+		{"https://example.com/video.mp4", false},
+		{"https://example.com/watch?v=abc", false},
+		{"https://example.com/", false},
+
+		// .m3u8 がパス末尾でない箇所に現れるだけのもの
+		{"https://m3u8.example.com/video.mp4", false},
+		{"https://example.com/a.m3u8/b.mp4", false},
+		{"https://example.com/x?file=a.m3u8", false},
+
+		// 不正な URL
+		{"--exec=touch /tmp/pwned.m3u8", false},
+		{"file:///tmp/a.m3u8", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := isM3U8URL(c.in); got != c.want {
+			t.Errorf("isM3U8URL(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+// 仕様: aidlc-docs/inception/application-design/design.md「Referer は m3u8 URL に限って付与する」
+// m3u8 URL のオリジン（scheme://host/）を返す。m3u8 でない・不正な URL なら "" を返す。
+func TestRefererFor(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		// 正常系: オリジンだけを返す（パス・クエリ・フラグメントは落とす）
+		{"https://vod.example.com/hls/ab12cd/master.m3u8", "https://vod.example.com/"},
+		{"http://example.com/media.m3u8", "http://example.com/"},
+		{"https://example.com/master.m3u8?token=abc123", "https://example.com/"},
+		{"https://example.com/a/b/c.m3u8#frag", "https://example.com/"},
+		{"  https://example.com/a.m3u8  ", "https://example.com/"},
+
+		// ポートは保つ（別ポートは別オリジン）
+		{"http://example.com:8080/media.m3u8", "http://example.com:8080/"},
+
+		// m3u8 でないものには付与しない（既存サイトの経路に触らないため）
+		{"https://example.com/video.mp4", ""},
+		{"https://example.com/watch?v=abc", ""},
+
+		// 不正な URL
+		{"file:///tmp/a.m3u8", ""},
+		{"--referer=http://evil/", ""},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := refererFor(c.in); got != c.want {
+			t.Errorf("refererFor(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// 引数インジェクション対策: 戻り値は決して "-" で始まらない。
+	// design.md「引数インジェクション対策（-- 終端は必須）」と同じ多層防御。
+	for _, in := range []string{
+		"https://example.com/a.m3u8",
+		"--exec=x.m3u8",
+		"-J",
+		"http://-evil.example.com/a.m3u8",
+		"",
+	} {
+		if got := refererFor(in); strings.HasPrefix(got, "-") {
+			t.Errorf("refererFor(%q) = %q: '-' 始まりを返してはいけない", in, got)
+		}
+	}
+}
+
+// 仕様: aidlc-docs/inception/application-design/design.md「保存名は URL だけから組み立てる（m3u8FileName）」
+// HLS にはタイトルのメタデータがないため、URL から判別可能な base 名を組み立てる。
+func TestM3U8FileName(t *testing.T) {
+	now := time.Date(2026, 9, 21, 9, 15, 0, 0, time.UTC)
+	const ts = "20260921-0915"
+
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "ホスト + 意味のあるパス要素 + 日時",
+			in:   "https://vod.example.com/hls/ab12cd/master.m3u8",
+			want: "vod.example.com_ab12cd_" + ts,
+		},
+		{
+			name: "パス要素が汎用語だけなら省略する",
+			in:   "https://example.com/hls/master.m3u8",
+			want: "example.com_" + ts,
+		},
+		{
+			name: "パス要素がなければ省略する",
+			in:   "https://example.com/master.m3u8",
+			want: "example.com_" + ts,
+		},
+		{
+			name: "末尾から汎用語を飛ばして最初の非汎用語を採る",
+			in:   "https://example.com/abc123/hls/stream/index.m3u8",
+			want: "example.com_abc123_" + ts,
+		},
+		{
+			name: "クエリのトークンは保存名に含めない",
+			in:   "https://example.com/v/xyz789/master.m3u8?token=SECRETTOKEN&exp=99",
+			want: "example.com_xyz789_" + ts,
+		},
+		{
+			name: "ポートは保存名に含めない（ファイル名に : を持ち込まない）",
+			in:   "https://example.com:8080/abc/a.m3u8",
+			want: "example.com_abc_" + ts,
+		},
+		{
+			name: "m3u8 でない URL には空文字を返す",
+			in:   "https://example.com/video.mp4",
+			want: "",
+		},
+		{
+			name: "不正な URL には空文字を返す",
+			in:   "--exec=x.m3u8",
+			want: "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := m3u8FileName(c.in, now); got != c.want {
+				t.Errorf("m3u8FileName(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+
+	// 生成名はそのままファイル名として使える（sanitizeFilename が何も変えない）こと。
+	t.Run("生成名は既に安全なファイル名である", func(t *testing.T) {
+		for _, in := range []string{
+			"https://example.com/abc/a.m3u8",
+			"https://example.com:8080/a:b/c*d/a.m3u8",
+			"https://example.com/../a.m3u8",
+			"https://example.com/CON/a.m3u8",
+		} {
+			got := m3u8FileName(in, now)
+			if got == "" {
+				t.Errorf("m3u8FileName(%q) が空文字（保存名が決まらない）", in)
+				continue
+			}
+			if s := sanitizeFilename(got); s != got {
+				t.Errorf("m3u8FileName(%q) = %q は sanitizeFilename で %q に変わる（既に安全であるべき）", in, got, s)
+			}
+			if strings.ContainsAny(got, `/\:`) {
+				t.Errorf("m3u8FileName(%q) = %q にパス区切りが含まれる", in, got)
+			}
+		}
+	})
+}
+
+// 仕様: aidlc-docs/inception/application-design/design.md「適用箇所」
+// m3u8 URL は STEP2a で取得したタイトルを使わず、URL から生成した名前を使う。
+func TestResolveTitle(t *testing.T) {
+	now := time.Date(2026, 9, 21, 9, 15, 0, 0, time.UTC)
+	const ts = "20260921-0915"
+
+	cases := []struct {
+		name         string
+		url          string
+		fetchedTitle string
+		want         string
+	}{
+		{
+			name:         "m3u8 は取得タイトル（= m3u8 のファイル名）を捨てて生成名を使う",
+			url:          "https://vod.example.com/hls/ab12cd/master.m3u8",
+			fetchedTitle: "master",
+			want:         "vod.example.com_ab12cd_" + ts,
+		},
+		{
+			name:         "m3u8 でタイトルが取れなくても生成名が決まる",
+			url:          "https://vod.example.com/hls/ab12cd/master.m3u8",
+			fetchedTitle: "",
+			want:         "vod.example.com_ab12cd_" + ts,
+		},
+		{
+			// デグレ防止: 既存サイトのタイトルを壊してはいけない
+			name:         "m3u8 でない URL は取得タイトルをそのまま使う",
+			url:          "https://example.com/watch?v=abc",
+			fetchedTitle: "Never Gonna Give You Up",
+			want:         "Never Gonna Give You Up",
+		},
+		{
+			name:         "m3u8 でなくタイトルも空ならそのまま空（既存の tmpBase フォールバック経路）",
+			url:          "https://example.com/watch?v=abc",
+			fetchedTitle: "",
+			want:         "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := resolveTitle(c.url, c.fetchedTitle, now); got != c.want {
+				t.Errorf("resolveTitle(%q, %q) = %q, want %q", c.url, c.fetchedTitle, got, c.want)
+			}
+		})
+	}
+}
+
+// 仕様: aidlc-docs/inception/application-design/design.md「ログにトークン付き URL を残さない（redactLine）」
+// m3u8 の URL は有効期限トークンが実質的な認可情報なので、平文ログに残してはいけない（SECURITY-03）。
+func TestRedactLine(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "クエリはマスクし、パスは残す",
+			in:   "[STEP2] command: yt-dlp -- https://e.com/hls/a/master.m3u8?token=SECRETVALUE",
+			want: "[STEP2] command: yt-dlp -- https://e.com/hls/a/master.m3u8?<redacted>",
+		},
+		{
+			name: "複数パラメータもまとめてマスクする",
+			in:   "https://e.com/a.m3u8?token=SECRET&exp=1789&sig=DEADBEEF",
+			want: "https://e.com/a.m3u8?<redacted>",
+		},
+		{
+			name: "同じ行の複数 URL をすべてマスクする",
+			in:   "from https://a.com/x.m3u8?k=S1 to https://b.com/y.ts?k=S2 done",
+			want: "from https://a.com/x.m3u8?<redacted> to https://b.com/y.ts?<redacted> done",
+		},
+		{
+			name: "クエリがない URL は変化しない",
+			in:   "--referer https://e.com/ -- https://e.com/hls/a/master.m3u8",
+			want: "--referer https://e.com/ -- https://e.com/hls/a/master.m3u8",
+		},
+		{
+			name: "URL を含まない行は一切変化しない",
+			in:   "[download]  45.3% of   10.00MiB at    1.50MiB/s ETA 00:03",
+			want: "[download]  45.3% of   10.00MiB at    1.50MiB/s ETA 00:03",
+		},
+		{
+			name: "http も対象",
+			in:   "http://e.com/a.m3u8?t=S",
+			want: "http://e.com/a.m3u8?<redacted>",
+		},
+		{
+			name: "引用符で囲まれた URL の外側は壊さない",
+			in:   `Destination: "https://e.com/a.m3u8?t=S"`,
+			want: `Destination: "https://e.com/a.m3u8?<redacted>"`,
+		},
+		{
+			name: "空文字",
+			in:   "",
+			want: "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := redactLine(c.in); got != c.want {
+				t.Errorf("redactLine(%q)\n got = %q\nwant = %q", c.in, got, c.want)
+			}
+		})
+	}
+
+	// 冪等であること（ログ経路が増えて二重適用されても壊れない）。
+	t.Run("冪等", func(t *testing.T) {
+		for _, in := range []string{
+			"https://e.com/a.m3u8?token=SECRET",
+			"https://e.com/a.m3u8",
+			"no url here",
+			"a https://x/y?z=1 b https://p/q?r=2 c",
+		} {
+			once := redactLine(in)
+			if twice := redactLine(once); twice != once {
+				t.Errorf("redactLine が冪等でない: in=%q once=%q twice=%q", in, once, twice)
+			}
+		}
+	})
+
+	// トークンそのものが出力に残らないこと。
+	t.Run("トークンが出力に残らない", func(t *testing.T) {
+		const secret = "SUPERSECRETTOKEN"
+		for _, in := range []string{
+			"https://e.com/a.m3u8?token=" + secret,
+			"cmd -- https://e.com/a.m3u8?a=1&token=" + secret + "&b=2",
+			"https://e.com/seg.ts?sig=" + secret,
+		} {
+			if got := redactLine(in); strings.Contains(got, secret) {
+				t.Errorf("redactLine(%q) = %q にトークンが残っている", in, got)
+			}
+		}
+	})
+}
+
+// 仕様: aidlc-docs/inception/application-design/design.md「ログにトークン付き URL を残さない（redactLine）」
+// マスクはログ行の組み立てで行う。各呼び出し側が redactLine を呼ぶ設計にすると
+// 1 箇所でも漏れたらその経路だけ穴が空くため、構造的に漏れない形にする。
+func TestLogLine(t *testing.T) {
+	now := time.Date(2026, 9, 21, 9, 15, 30, 500_000_000, time.UTC)
+
+	t.Run("タイムスタンプ接頭辞と改行が付く", func(t *testing.T) {
+		got := logLine(now, "[STEP1] workDir created")
+		want := "[09:15:30.500] [STEP1] workDir created\n"
+		if got != want {
+			t.Errorf("logLine() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("引数に含まれる URL のクエリは組み立て時にマスクされる", func(t *testing.T) {
+		const secret = "SUPERSECRETTOKEN"
+		got := logLine(now, "[STEP2] command: %s %s", "yt-dlp", "-- https://e.com/a/master.m3u8?token="+secret)
+		if strings.Contains(got, secret) {
+			t.Errorf("logLine() にトークンが残っている: %q", got)
+		}
+		if !strings.Contains(got, "https://e.com/a/master.m3u8?<redacted>") {
+			t.Errorf("logLine() のマスク結果が想定と違う: %q", got)
+		}
+	})
+
+	t.Run("yt-dlp の出力行に含まれる URL もマスクされる", func(t *testing.T) {
+		const secret = "FRAGTOKEN"
+		got := logLine(now, "[STEP3] yt-dlp: %s", "[download] Got error: HTTP Error 403 for https://cdn.e.com/seg001.ts?sig="+secret)
+		if strings.Contains(got, secret) {
+			t.Errorf("logLine() にトークンが残っている: %q", got)
+		}
+	})
+
+	t.Run("URL を含まない行は書式以外変化しない", func(t *testing.T) {
+		got := logLine(now, "[STEP3] yt-dlp: %s", "[download]  45.3% of   10.00MiB")
+		want := "[09:15:30.500] [STEP3] yt-dlp: [download]  45.3% of   10.00MiB\n"
+		if got != want {
+			t.Errorf("logLine() = %q, want %q", got, want)
+		}
+	})
+}
+
+// 仕様: aidlc-docs/inception/application-design/design.md「Kill(-pid) の符号は致命的に危険」
+//
+// kill(2) は第 1 引数の符号と値で意味が変わる。-pgid でグループ全体を狙うとき、
+// pid が 0 や 1 だと kill(0, ...)（自分自身のグループ）や kill(-1, ...)（権限内の全プロセス）
+// が成立してアプリごと巻き込んで殺す。符号を反転させる前にこの述語で必ず弾く。
+func TestIsKillablePID(t *testing.T) {
+	cases := []struct {
+		pid  int
+		want bool
+	}{
+		// 正常系: 通常のプロセス
+		{2, true},
+		{3, true},
+		{12345, true},
+		{1 << 20, true},
+
+		// 弾かなければならない値
+		{1, false},  // init / launchd。-1 に反転すると全プロセスへの送信になる
+		{0, false},  // -0 == 0 で自分自身のプロセスグループを殺す
+		{-1, false}, // 既に負。反転すると 1 になり init を狙う
+		{-2, false},
+		{-12345, false},
+	}
+	for _, c := range cases {
+		if got := isKillablePID(c.pid); got != c.want {
+			t.Errorf("isKillablePID(%d) = %v, want %v", c.pid, got, c.want)
+		}
+	}
+}
+
+// 仕様: aidlc-docs/inception/application-design/design.md「期限切れ URL」
+// requirements.md「期限切れ URL」: 403 で失敗したとき失効の可能性と取り直しを案内する。
+func TestIsYtDlpErrorLine(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"ERROR: [generic] master: Unable to download webpage: HTTP Error 403: Forbidden", true},
+		{"ERROR: fragment 2 not found, unable to continue", true},
+		{"  ERROR: something failed  ", true}, // 前後空白はトリムされる
+		{"[download]  45.3% of   10.00MiB", false},
+		{"[hlsnative] Total fragments: 3", false},
+		{"WARNING: something", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := isYtDlpErrorLine(c.in); got != c.want {
+			t.Errorf("isYtDlpErrorLine(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestExplainDownloadError(t *testing.T) {
+	const m3u8 = "https://vod.e.com/hls/x/master.m3u8?token=SECRETTOKEN"
+	const normal = "https://e.com/watch?v=abc"
+
+	t.Run("m3u8 の 403 は URL 失効の可能性を案内する", func(t *testing.T) {
+		got := explainDownloadError("ERROR: Unable to download webpage: HTTP Error 403: Forbidden", m3u8, "exit status 1")
+		for _, want := range []string{"403", "失効", "取り直"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("説明 %q に %q が含まれない", got, want)
+			}
+		}
+	})
+
+	t.Run("m3u8 でない 403 は失効の案内をしない", func(t *testing.T) {
+		got := explainDownloadError("ERROR: HTTP Error 403: Forbidden", normal, "exit status 1")
+		if !strings.Contains(got, "403") {
+			t.Errorf("説明 %q に 403 が含まれない", got)
+		}
+		if strings.Contains(got, "失効") {
+			t.Errorf("m3u8 でないのに失効を案内している: %q", got)
+		}
+	})
+
+	t.Run("403 以外のエラー行はそのまま伝える", func(t *testing.T) {
+		got := explainDownloadError("ERROR: fragment 2 not found, unable to continue", m3u8, "exit status 1")
+		if !strings.Contains(got, "fragment 2 not found") {
+			t.Errorf("説明 %q に元のエラーが含まれない", got)
+		}
+	})
+
+	t.Run("エラー行がなければ終了状態を使う", func(t *testing.T) {
+		got := explainDownloadError("", normal, "exit status 1")
+		if got != "exit status 1" {
+			t.Errorf("説明 = %q, want %q", got, "exit status 1")
+		}
+	})
+
+	// SECURITY-03: ユーザー向け文言にもトークンを載せない（画面・クリップボード経由で漏れる）。
+	t.Run("説明にトークンが含まれない", func(t *testing.T) {
+		const secret = "SECRETTOKEN"
+		for _, line := range []string{
+			"ERROR: Unable to download webpage: HTTP Error 403: Forbidden (" + m3u8 + ")",
+			"ERROR: unable to fetch https://cdn.e.com/seg.ts?sig=" + secret,
+			"",
+		} {
+			if got := explainDownloadError(line, m3u8, "exit status 1"); strings.Contains(got, secret) {
+				t.Errorf("説明 %q にトークンが残っている", got)
+			}
+		}
+	})
+}
+
 // 仕様: aidlc-docs/inception/application-design/design.md「sanitizeFilename について」
 // 禁止文字（\ / : * ? " < > |）を _ に置換し、前後の空白と末尾のドットを除去する。
 func TestSanitizeFilename(t *testing.T) {
@@ -292,6 +744,50 @@ func TestBuildYtDlpArgs(t *testing.T) {
 		}
 		if got[len(got)-2] != "--" {
 			t.Errorf("URL の直前が -- でない: %v", got)
+		}
+	})
+
+	// 仕様: design.md「Referer は m3u8 URL に限って付与する」
+	t.Run("m3u8 URL には --referer でオリジンを渡す", func(t *testing.T) {
+		for _, ff := range []string{"", "/usr/bin/ffmpeg"} {
+			s := join(buildYtDlpArgs("abc", "/work", ff, "https://vod.e.com/hls/x/master.m3u8?t=1"))
+			if !strings.Contains(s, "--referer https://vod.e.com/") {
+				t.Errorf("ffmpegLoc=%q: --referer がない: %q", ff, s)
+			}
+		}
+	})
+
+	// デグレ防止の表明: 既存の対応サイトは Referer なしで動いているため、
+	// m3u8 以外の URL に --referer を付けてはいけない。
+	t.Run("m3u8 でない URL には --referer を付けない", func(t *testing.T) {
+		for _, u := range []string{
+			"https://e.com/v",
+			"https://e.com/watch?v=abc",
+			"https://e.com/video.mp4",
+		} {
+			s := join(buildYtDlpArgs("abc", "/work", "/usr/bin/ffmpeg", u))
+			if strings.Contains(s, "--referer") {
+				t.Errorf("url=%q に --referer を付けてはいけない: %q", u, s)
+			}
+		}
+	})
+
+	t.Run("--referer は -- 終端より前に置く", func(t *testing.T) {
+		got := buildYtDlpArgs("abc", "/work", "", "https://e.com/master.m3u8")
+		refIdx, sepIdx := -1, -1
+		for i, a := range got {
+			if a == "--referer" {
+				refIdx = i
+			}
+			if a == "--" {
+				sepIdx = i
+			}
+		}
+		if refIdx == -1 || sepIdx == -1 {
+			t.Fatalf("--referer または -- が見つからない: %v", got)
+		}
+		if refIdx > sepIdx {
+			t.Errorf("--referer が -- より後ろにある（位置引数に化ける）: %v", got)
 		}
 	})
 

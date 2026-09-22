@@ -127,3 +127,95 @@
 **Context**: CONSTRUCTION - Code Generation（完了）→ 手動確認待ち
 
 ---
+## 新規要件（m3u8 対応）— 初期リクエスト
+**Timestamp**: 2026-09-21T00:00:00Z
+**User Input**: "m3u8という拡張子のファイルで示される動画をダウンロードできるようにできないか？"
+**AI Response**: "Workspace Detection を実行（既存 aidlc-state.md を検出し Brownfield としてレジューム）。既存要件・設計・コードをロードし Requirements Analysis に進む。"
+**Context**: INCEPTION - Workspace Detection（新規要件 3 の起点）
+
+---
+
+## 新規要件（m3u8 対応）— 意図分析と実測
+**Timestamp**: 2026-09-21T00:00:00Z
+**User Input**: "m3u8という拡張子のファイルで示される動画をダウンロードできるようにできないか？"
+**AI Response**: "要求が曖昧（URL 形式かローカルファイルか不明）と判定し、推測で進める前に現状の挙動を実測。ローカルに HLS（VOD・320x240・3 断片、ffmpeg で生成した合成テスト映像）を立て python3 -m http.server で配信し、現行コードと同一引数の yt-dlp を実行した。結果: (1) FetchPlaylist 相当は成功し 1 エントリを返す（webpage_url = m3u8 URL、id/title = m3u8 のファイル名 'master'）、(2) buildYtDlpArgs と同一引数の本ダウンロードも成功し [hlsnative] Total fragments: 3 → [FixupM3u8] を経て mp4 が生成された。すなわち https 形式の m3u8 URL はアプリ無変更で既にダウンロード可能。加えて #EXT-X-ENDLIST のない m3u8 は is_live: true / duration: null と判定されることも実測。コード読解で isValidURL が http/https+ホストを要求するためローカル .m3u8（file:// および素のパス）は入口で拒否されることを確認。以上から埋めるべき穴を 4 点（保存ファイル名が master.mp4 に集中／ローカルファイル拒否／ライブ停止時に録れた分が残らない／Referer・Cookie を渡す手段なし。4 点目のみ未実測の推定と明記）として整理し、requirement-verification-questions.md に Q1〜Q6（Q5/Q6 は拡張オプトイン）を作成。既存の同ファイル（要件 1 の Q&A）は requirement-verification-questions-archive.md へ git mv して保全。"
+**Context**: INCEPTION - Requirements Analysis Step 2〜6（質問提示・GATE で停止）
+
+---
+
+## 新規要件（m3u8 対応）— スコープ確定と実現可能性評価
+**Timestamp**: 2026-09-21T00:00:00Z
+**User Input**: "インターネットに置いてあるファイルです。これをダウンロードしたいんです。現実的に実行可能なのかを先に考えて欲しいです"
+**AI Response**: "Q1 を『インターネット上の m3u8 URL』と確定（ローカル .m3u8 対応は対象外）。要件確定より先に実現可能性を判定するため、python3 でテストサーバを立て実サイトの配信条件を再現し、buildYtDlpArgs と同一引数で 9 シナリオを実測した（素材は ffmpeg 生成の合成映像 testsrc+sine、実在コンテンツ不使用）。成功: 素の VOD（master/media 両方）、AES-128 暗号化 HLS（鍵 URI から自動復号）、映像音声別レンディション（Merger で結合）。失敗: Referer 必須サーバ（403）→ --referer 付与で解消、期限切れ URL（403・対策不能）、断片 1 つ 403（--abort-on-unavailable-fragment が設計どおり中断）。ライブは自然終了しない。
+
+★重大な発見: ライブ HLS は yt-dlp が ffmpeg を子プロセスとして起動し委譲する（実測 PID 57658 の子 57660）。一方アプリの停止系はすべて item.cmd = yt-dlp のみを対象とし、applyOSProcAttr は非 Windows で no-op でプロセスグループを作らない。決定的実測: yt-dlp だけに SIGKILL → ffmpeg は PPID 1 の孤児として生存し取得を継続。よってキャンセルは帯域を食い続け、一時停止は実際には止まらず、waitProcsDrained は ffmpeg が掴んだままでも排出完了と誤判定する。これは m3u8 固有ではなく既存バグ（VOD でも Merger/FixupM3u8 中のキャンセルで同経路）で、design.md『停止対象は実行中だけでは足りない』の 3 経路に孫プロセスとして漏れていた。検証中に実際に孤児 ffmpeg が 2 プロセス残留したため手動で後片付けした。
+
+さらに中断時の残骸を実測: VOD（hlsnative）の .part は 59,220 バイトの valid な MPEG-TS で ffprobe が読め ffmpeg -c copy で救出可能。ライブ（ffmpeg）の .part は SIGKILL では 0 バイトかつ Invalid data で救出不能。よって『停止して保存』は VOD なら現実的、ライブには graceful stop が必須。
+
+以上を m3u8-feasibility.md に文書化し、スコープを 3 段（第1段: Referer/ファイル名/期限切れ案内、第2段: 孤児化修正=独立要件、第3段: ライブ録画）に分割して第1段のみを推奨。requirement-verification-questions.md を実測結果に合わせて Q1〜Q6 に作り直した（Q1 をスコープ選択に差し替え）。"
+**Context**: INCEPTION - Requirements Analysis（実現可能性評価完了・Step 6 GATE で回答待ち）
+
+---
+
+## 新規要件（m3u8 対応）— Q1 の言い直しとスコープ確定
+**Timestamp**: 2026-09-21T00:00:00Z
+**User Input**: "Q1がどれなのかよくわかりません"
+**AI Response**: "Q1 の設問が不良だったと認め、AI が勝手に作った『第1段／第2段』という語を捨てて平易に言い直した。あわせて『まず手元の m3u8 URL を今のアプリで試せば Q1 は自動的に決まる』という判定表（成功だがファイル名不明→A / 403→A / 失効→A / 終わらない→ライブなので D）を提示。推奨は A（既存の停止処理に触らず回帰リスクが低い）とした。"
+**Context**: INCEPTION - Requirements Analysis（Q1 の再提示）
+
+---
+
+## 新規要件（m3u8 対応）— Q1 回答
+**Timestamp**: 2026-09-21T00:00:00Z
+**User Input**: "Bをやってほしい"
+**AI Response**: "Q1 = B（AI 推奨の A ではなくユーザー判断の B）を確定として記録。スコープは (1) 保存ファイル名の改善 (2) Referer の付与 (3) 期限切れ URL の案内 (4) ffmpeg 孫プロセスが停止されない既存バグの修正（CancelDownload / PauseDownload / UpdateYtDlp の waitProcsDrained の 3 経路）。対象外はライブ配信の録画とローカル .m3u8 の読み込み。残る Q2〜Q6 に実測と既存設計に基づく推奨を記入した: Q2=B（URL だけから決まる純粋関数で命名。C/D の入力欄はドロップ経路で入力機会がないため不採用）、Q3=B ただし適用をパスが .m3u8 で終わる URL に限定（既存 1000 サイトの経路に触らないデグレ防止）、Q4=D（A+C。B は design.md が禁じる maxActive==0 の特別分岐になるため不採用）、Q5=A（前回はスキップだったが今回は --referer の値が新たな引数インジェクション面になり、かつ停止方法自体を変更するため Yes を推奨）、Q6=A（純粋関数が 3 つ増えるため）。"
+**Context**: INCEPTION - Requirements Analysis（Q1 確定・Q2〜Q6 の推奨提示）
+
+---
+
+## 新規要件（m3u8 対応）— Q2〜Q6 承認と要件文書の作成
+**Timestamp**: 2026-09-22T00:00:00Z
+**User Input**: "進めて"
+**AI Response**: "Q2=B / Q3=B / Q4=D / Q5=A / Q6=A を推奨どおり確定として記録。Q5=A・Q6=A により opt-in となったため security-baseline.md と property-based-testing.md をロード（Deferred Rule Loading）。Security Baseline は要件 1・2 では No だったが要件 3 で Yes に変更（理由: Referer という新しい文字列を yt-dlp のコマンドラインに渡すため引数インジェクション面が拡大する／プロセスの停止方法そのものを変更する）。
+
+requirements.md に「m3u8（HLS）対応」節を新設（既存要件への追記方針を継続）。内容: 意図分析（Enhancement + Bug Fix / Multiple Components / Moderate）、受け入れ方法（m3u8 専用経路を作らない・0 の例外を作らない）、保存ファイル名（URL だけから決まる純粋関数で自動生成）、Referer（.m3u8 で終わる URL 限定でオリジンを送る。限定自体を要件として明文化＝デグレ防止）、期限切れ URL（登録時警告 + 失敗時説明。0 の特別分岐は禁止）、停止操作が子プロセスに及ぶこと（既存不具合の修正・3 経路）、セキュリティ要件、対象外の表。
+
+セキュリティ拡張の有効化に伴い app.go のログ実装を確認し、新たな該当事象を 1 件発見して要件に反映: moviedl.log（ユーザー設定フォルダ内・0644・平文）に実行コマンド全体と yt-dlp 出力行が追記されており、有効期限トークン付き URL がクエリ文字列ごと記録される。m3u8 の URL はトークンが実質的な認可情報であるため SECURITY-03（ログに機微情報を出力しない）に該当すると判断し、『ログに書く URL はクエリ部分をマスクする』を要件に追加した。
+
+aidlc-state.md を更新: Extension Configuration を要件 3 の設定に更新し過去 2 要件の設定を記録として保持、Stage Progress を要件 3 用に作り直し（要件 1・2 の進捗は別節へ移して保全）、Current Stage を Requirements Analysis 完了・承認待ちに更新。"
+**Context**: INCEPTION - Requirements Analysis Step 7〜9（要件文書作成・承認待ち）
+
+---
+
+## 新規要件（m3u8 対応）— 要件承認と Workflow Planning
+**Timestamp**: 2026-09-22T00:00:00Z
+**User Input**: "作業を続けて"
+**AI Response**: "要件承認と解釈し Requirements Analysis を APPROVED として記録。User Stories は SKIP と判定（新しいペルソナもユーザーワークフローも生じず、可視の変更は保存名の規則・警告文・エラー文言の 3 点で既存フロー内の表示変更のみ。バグ修正部分は再現手順が実測で確定済み）。Workflow Planning を実行し workflow-plan-m3u8.md を作成（既存の workflow-plan.md は要件 1 用のため上書きせず要件別に分離）。
+
+リスクを Medium〜High と評価し、その所在をプロセス停止方法の変更 1 点に特定した: (1) 過去に罠を踏んだ CancelDownload / PauseDownload / UpdateYtDlp に触る（design.md に明文化済みの領域で CLAUDE.md デグレ防止の対象）、(2) 非 Windows のプロセスグループと Windows の Job Object で実装が完全に分かれ Windows 側を開発機 macOS で検証できない、(3) 停止範囲を広げるため無関係プロセスへの波及の危険。低減策として m3u8 の機能追加（純粋関数中心・低リスク）と停止の修正（高リスク）を別コミットに分離し停止の修正を最後に単独で行う方針を決定。
+
+ステージ判定: Application Design を EXECUTE / standard（要件 1・2 の minimal から格上げ。理由は (a) プロセスグループ登録が applyOSProcAttr や -- 終端と同じ『1 箇所でも漏れたら穴が空く』新ルールになる、(b) design.md の『停止対象は実行中だけでは足りない』節が孫プロセスを扱っておらず誤りの訂正が必要、(c) PBT-01、(d) CLAUDE.md が義務化するピットフォール記録）。NFR Requirements は部分実行 / minimal（PBT-09 は rapid で既定済み）。NFR Design は SKIP（セキュリティ要件 5 件は論理コンポーネント設計ではなく具体的な実装規則のため design.md に直接記載する判断）。Infrastructure Design・Units Generation・Functional Design は SKIP。Build and Test は standard（Windows 実機の手動確認が必要なため minimal にしない）。
+
+規模は約 12 TDD サイクル（コミット A 7 + コミット B 5）と見積もり。触ってはいけないもの（uniqueDest / -o ランダム方式 / -- 終端 / --abort-on-unavailable-fragment / shouldRemoveWhenDone / maxActive==0 の一般ルール）を計画に明示。content-validation.md に従い Mermaid をスクリプトで構文検証（16 ノード・未定義参照なし）し、テキスト代替も併記した。"
+**Context**: INCEPTION - Workflow Planning（完了・承認待ち）
+
+---
+
+## 新規要件（m3u8 対応）— Application Design 〜 Build and Test
+**Timestamp**: 2026-09-23T00:00:00Z
+**User Input**: "どんどん進めて"
+**AI Response**: "Workflow Plan 承認と解釈し Application Design → NFR Requirements → Code Generation → Build and Test を連続実行した。
+
+Application Design（standard）: design.md に (1)「m3u8 / HLS」節（判定を isM3U8URL 1 つに集約／Referer は m3u8 限定＝デグレ防止／保存名は URL だけから組み立てる／ログのトークンマスク／期限切れ URL／PBT-01 プロパティ 12 件）と (2)「プロセス管理（停止は孫プロセスまで及ばせる）」節（ライブ HLS が ffmpeg に委譲される実測／OS ごとの 6 関数抽象／kill(-pid) の符号が致命的に危険／Windows の Job Object と割り当て競合窓／ライブ停止時に .part が 0 バイトになる非対称性）を追加。既存「停止対象は『実行中』だけでは足りない」節の取りこぼし経路を 3 → 4（孫プロセス）に訂正した。
+
+Code Generation: TDD 13 サイクル（Red の失敗を毎回 go test で確認 → Green → Refactor）。追加した純粋関数は isM3U8URL / refererFor / m3u8FileName / meaningfulPathSegment / resolveTitle / redactLine / logLine / isKillablePID / isYtDlpErrorLine / explainDownloadError。OS 抽象は applyOSProcAttr(Setpgid) / trackProcessTree / killProcessTree / suspendProcessTree / resumeProcessTree / releaseProcessTree / processTreeGone を両 OS に実装。停止経路（stopTargets / killRegisteredProcs / PauseDownload / ResumeDownload / CancelDownload）をツリー版に切り替え、UpdateYtDlp STEP4 で登録簿の排出とツリー消滅の両方を待つようにした。フロントエンドは m3u8 の期限切れ注意バナーと IsM3U8URL 経由の判定一本化。
+
+計画からの差異 7 件を code-generation-plan-m3u8.md に記録。主なもの: (a) A7 を各呼び出し側の redactLine から logLine 内での一括マスクに変更（『1 箇所でも漏れたら穴が空く』ルールを増やさないため）、(b) 計画外サイクル A8 を追加 — 要件『403 で URL 失効を案内』を実装しようとして item.Error に cmd.Wait の "exit status 1" しか入っておらず 403 を判別する材料が存在しないことが判明したため、ERROR 行の捕捉と explainDownloadError を追加（副作用として m3u8 以外でも失敗理由が実際のエラー行に変わる。意図した改善）、(c) processTreeGone / waitTreesGone の追加、(d) isKillablePGID → isKillablePID に改名し app.go へ移動（Windows でも使うため）、(e) IsM3U8URL の Wails バインディング追加、(f) Windows はジョブ作成失敗時に従来の単一プロセス停止へフォールバックする設計（macOS で検証不可能なため悪化させない）、(g) コミットは未実施。
+
+Build and Test: make check 成功（gofmt 差分なし / go vet 警告なし / staticcheck 警告なし / go test -race ok）。テスト 67 件通過（例示ベース 41 + PBT 26。PBT は 16 → 26 に増加）。GOOS=windows の build と vet も通過。非 Windows は実プロセスを起こす統合テスト 7 件を追加し、孤児化の回帰（子まで死ぬこと）と対照実験（リーダーだけ Kill すると子が生き残ること）を固定した。SECURITY コンプライアンス 15 ルール・PBT コンプライアンス 10 ルールを評価し blocking findings なし（SECURITY-09 はエラー文言に作業ディレクトリのパスが含まれうる点を注記付き Compliant、SECURITY-10 は releases/latest のバージョン非固定を既知の受容済み例外として記録）。
+
+未完了として明示: macOS / Windows 実機の手動確認。とくに Windows の Job Object は開発機で動作検証できず、『孫プロセスまで停止が及ぶ』という主目的が Windows で達成されているかは未検証である。"
+**Context**: INCEPTION Application Design → CONSTRUCTION Code Generation → Build and Test（自動検証完了・実機手動確認待ち）
+
+---
+

@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	goruntime "runtime"
 	"strings"
 	"sync"
@@ -696,10 +697,21 @@ func (a *App) UpdateYtDlp() error {
 		t.item.markStoppedForUpdate() // Wait エラーを "error" ではなく再キュー扱いにする
 	}
 	stopTargets(targets)
-	a.killRegisteredProcs() // アイテムに紐づかない情報取得プロセスの取りこぼしを防ぐ
+	killed := a.killRegisteredProcs() // アイテムに紐づかない情報取得プロセスの取りこぼしを防ぐ
+
+	// 停止を試みたツリーを集める（登録簿の排出だけでは孫プロセスを見られないため）。
+	trees := make([]*exec.Cmd, 0, len(killed)+len(targets))
+	trees = append(trees, killed...)
+	for _, t := range targets {
+		if t.cmd != nil {
+			trees = append(trees, t.cmd)
+		}
+	}
 
 	// STEP 4: プロセスが消えるのを待ってから配置する（Windows は実行中 .exe を上書き不可）。
-	if !a.waitProcsDrained(procDrainTimeout) {
+	// 登録簿の排出（yt-dlp 本体）と、ツリーの消滅（ffmpeg 孫プロセス）の**両方**を待つ。
+	// 孫を待たないと、実行ファイルを掴んだままの状態で置き換えて共有違反になる。
+	if !a.waitProcsDrained(procDrainTimeout) || !waitTreesGone(trees, procDrainTimeout) {
 		a.requeueStopped(targets)
 		return fmt.Errorf("実行中の yt-dlp が終了しないため更新を中止しました。しばらく待って再度お試しください")
 	}
@@ -714,22 +726,28 @@ func (a *App) UpdateYtDlp() error {
 // stopTargets は planStop が選んだアイテムのプロセスを停止する。
 // サスペンド中は SIGKILL を受け取れないため resume してから Kill する
 // （CancelDownload と同じ順序）。
+//
+// 停止はプロセス**ツリー**単位で行う。yt-dlp だけを止めると ffmpeg が孤児化して
+// 実行ファイルを掴んだままになり、Windows では置き換えが共有違反で失敗する。
+// design.md「プロセス管理（停止は孫プロセスまで及ばせる）」を参照。
 func stopTargets(targets []stopTarget) {
 	for _, t := range targets {
 		if t.cmd == nil || t.cmd.Process == nil {
 			continue
 		}
 		if t.needsResume {
-			resumeProcess(t.cmd) //nolint:errcheck
+			resumeProcessTree(t.cmd) //nolint:errcheck
 		}
-		t.cmd.Process.Kill() //nolint:errcheck
+		killProcessTree(t.cmd) //nolint:errcheck
 	}
 }
 
 // killRegisteredProcs は登録簿にあるすべての yt-dlp プロセスを Kill する。
 // FetchPlaylist / STEP2a のタイトル取得はアイテム経由で停止できないため、
 // これが取りこぼしを防ぐ backstop になる。
-func (a *App) killRegisteredProcs() {
+// 戻り値は停止を試みたコマンド。呼び出し側が waitTreesGone で
+// 孫プロセスまで消えたことを確認できるようにするため返す。
+func (a *App) killRegisteredProcs() []*exec.Cmd {
 	a.mu.Lock()
 	cmds := make([]*exec.Cmd, 0, len(a.procs))
 	for c := range a.procs {
@@ -738,8 +756,37 @@ func (a *App) killRegisteredProcs() {
 	a.mu.Unlock()
 	for _, c := range cmds {
 		if c.Process != nil {
-			c.Process.Kill() //nolint:errcheck
+			// ツリー単位で止める。yt-dlp だけを Kill すると ffmpeg が孤児化し、
+			// waitProcsDrained が「排出完了」と誤判定したまま実行ファイルを掴み続ける。
+			killProcessTree(c) //nolint:errcheck
 		}
+	}
+	return cmds
+}
+
+// waitTreesGone は停止したプロセスツリーが 1 つも残らなくなるまで待つ。
+//
+// **なぜ登録簿の排出だけでは足りないか:** 登録簿が数えるのは yt-dlp プロセスであって、
+// yt-dlp が起動する ffmpeg 孫プロセスではない。yt-dlp が回収された後も ffmpeg が
+// 実行ファイルを掴んだままなら、Windows では os.Rename での置き換えが共有違反で失敗する。
+// design.md「プロセス管理（停止は孫プロセスまで及ばせる）」を参照。
+func waitTreesGone(cmds []*exec.Cmd, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := false
+		for _, c := range cmds {
+			if !processTreeGone(c) {
+				remaining = true
+				break
+			}
+		}
+		if !remaining {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -912,6 +959,211 @@ func isValidURL(raw string) bool {
 	return (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
+// isM3U8URL は URL の**パス**が .m3u8 で終わるかを判定する（大小無視）。
+//
+// m3u8 向けの分岐（Referer 付与・保存名の生成・登録時の警告）は**すべてこの述語に集約する**。
+// 3 箇所が別々の判定を持つと、片方だけ直したときに挙動が食い違う。
+//
+// クエリ文字列は判定に含めない。m3u8 の URL は "...master.m3u8?token=x" のようにクエリ付きが
+// 普通であり、生文字列の strings.HasSuffix では末尾が .m3u8 にならないため判定できない。
+// 詳細は aidlc-docs/inception/application-design/design.md「判定は 1 つの述語に集約する」を参照。
+func isM3U8URL(raw string) bool {
+	if !isValidURL(raw) {
+		return false
+	}
+	u, err := neturl.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return strings.HasSuffix(strings.ToLower(u.Path), ".m3u8")
+}
+
+// refererFor は m3u8 URL のオリジン（scheme://host/）を Referer として返す。
+// m3u8 でない URL・不正な URL には "" を返し、呼び出し側は --referer を付けない。
+//
+// 付与を m3u8 に限定するのは**デグレ防止のため**。既存の 1000 以上の対応サイトは現在 Referer
+// なしで動作しており、全 URL に送り始めるとそれらの経路の挙動を変えてしまう。
+//
+// 組み立てた値は isValidURL で再検証してから返す。yt-dlp のオプションに化ける値
+// （"-" 始まり）を渡さないための多層防御で、design.md「引数インジェクション対策（-- 終端は必須）」
+// と同じ思想。詳細は design.md「Referer は m3u8 URL に限って付与する」を参照。
+func refererFor(raw string) string {
+	if !isM3U8URL(raw) {
+		return ""
+	}
+	u, err := neturl.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	// パス・クエリ・フラグメントは落とし、オリジンだけを渡す。
+	origin := u.Scheme + "://" + u.Host + "/"
+	if !isValidURL(origin) {
+		return ""
+	}
+	return origin
+}
+
+// m3u8GenericPathSegments は保存名を組み立てるときに飛ばすパス要素。
+// 配信構成上の定型語であって動画を識別しないため、これらを名前に入れても判別に役立たない。
+var m3u8GenericPathSegments = map[string]bool{
+	"hls": true, "stream": true, "streams": true, "media": true,
+	"video": true, "videos": true, "playlist": true, "manifest": true,
+	"out": true, "vod": true,
+}
+
+// m3u8FileName は m3u8 URL から「ホスト名 + 意味のあるパス要素 + 日時」の拡張子なし base 名を返す。
+// m3u8 でない URL には "" を返す。
+//
+// なぜ必要か: HLS の m3u8 にはタイトルのメタデータがないため、yt-dlp が返す title は
+// m3u8 のファイル名そのもの（master / index / playlist）になる。そのままでは保存名が
+// master.mp4 に集中し、2 本目以降が uniqueDest によって "master (1).mp4" になって判別できない。
+//
+// クエリ文字列は含めない。トークンで読めない名前になるうえ、ログのマスク方針と矛盾する。
+// 詳細は aidlc-docs/inception/application-design/design.md「保存名は URL だけから組み立てる」を参照。
+func m3u8FileName(raw string, now time.Time) string {
+	if !isM3U8URL(raw) {
+		return ""
+	}
+	u, err := neturl.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	// Host ではなく Hostname を使う。ポートを含めるとファイル名に ':' が入ってしまう。
+	parts := []string{u.Hostname()}
+	if seg := meaningfulPathSegment(u.Path); seg != "" {
+		parts = append(parts, seg)
+	}
+	parts = append(parts, now.Format("20060102-1504"))
+	// 呼び出し側（STEP5）も sanitizeFilename を通すが、ここで通しておくことで
+	// 「m3u8FileName の戻り値はそのままファイル名として使える」を関数の契約にできる。
+	// sanitizeFilename は冪等なので二重適用は無害。
+	return sanitizeFilename(strings.Join(parts, "_"))
+}
+
+// meaningfulPathSegment は .m3u8 のファイル名を除いたパス要素を末尾から走査し、
+// 汎用語でない最初の要素を返す。見つからなければ "" を返す。
+func meaningfulPathSegment(path string) string {
+	segs := strings.Split(path, "/")
+	if len(segs) > 0 {
+		segs = segs[:len(segs)-1] // 末尾の要素は .m3u8 のファイル名なので捨てる
+	}
+	for i := len(segs) - 1; i >= 0; i-- {
+		s := strings.TrimSpace(segs[i])
+		if s == "" || s == "." || s == ".." {
+			continue
+		}
+		if m3u8GenericPathSegments[strings.ToLower(s)] {
+			continue
+		}
+		return s
+	}
+	return ""
+}
+
+// resolveTitle は保存名の元になるタイトルを決める。
+// m3u8 URL なら STEP2a で取得したタイトルを捨てて m3u8FileName の生成名を使い、
+// それ以外は取得したタイトルをそのまま使う（既存サイトの挙動を変えない）。
+//
+// なぜ「取得タイトルが汎用語のときだけ上書き」にしないか: パスが .m3u8 で終わる URL は
+// generic エクストラクターが処理し、title は必ず m3u8 のファイル名になる（実測）。
+// 条件を足すとどちらの名前が使われるかが URL によって変わり、純粋関数で決まらなくなる。
+func resolveTitle(url, fetchedTitle string, now time.Time) string {
+	if name := m3u8FileName(url, now); name != "" {
+		return name
+	}
+	return fetchedTitle
+}
+
+// urlInLogPattern はログ行から http(s) URL を拾う。空白と引用符で止める。
+var urlInLogPattern = regexp.MustCompile(`https?://[^\s"']+`)
+
+// redactedQuery はマスク後のクエリ部分を表す。再適用しても同じ形になるため redactLine は冪等。
+const redactedQuery = "?<redacted>"
+
+// redactLine は文字列中の http(s) URL のクエリ部分を "?<redacted>" に置き換える。
+//
+// なぜ必要か: moviedl.log（os.UserConfigDir()/moviedl/ 内・0644・平文）には実行コマンド全体と
+// yt-dlp の出力行が追記される。m3u8 の URL は**有効期限トークンが実質的な認可情報**であり、
+// クエリ文字列ごと平文で残るのは機微情報の出力にあたる（SECURITY-03）。
+//
+// パスは残す（どのファイルで失敗したかの調査に必要）。落とすのはクエリだけ。
+// neturl.Parse に依存せず文字列操作だけで実装するのは、パース不能な行でも確実にマスクするため。
+// 詳細は aidlc-docs/inception/application-design/design.md「ログにトークン付き URL を残さない」を参照。
+func redactLine(s string) string {
+	return urlInLogPattern.ReplaceAllStringFunc(s, func(u string) string {
+		i := strings.IndexByte(u, '?')
+		if i < 0 {
+			return u
+		}
+		return u[:i] + redactedQuery
+	})
+}
+
+// logLine は runDownload のログ 1 行を組み立てる。
+//
+// **組み立ての最後に redactLine を通すのが要点。** 各呼び出し側で redactLine を呼ぶ設計にすると
+// 「1 箇所でも漏れたらその経路だけ穴が空く」（applyOSProcAttr や -- 終端と同じ性質の）ルールが
+// また 1 つ増える。ここで一度だけ通せば、logf の呼び出し側は URL を含む値をそのまま渡してよく、
+// マスク漏れが構造的に起きない。
+func logLine(now time.Time, format string, v ...any) string {
+	return redactLine(fmt.Sprintf("[%s] "+format, append([]any{now.Format("15:04:05.000")}, v...)...)) + "\n"
+}
+
+// isKillablePID は停止対象として正当な pid かを返す。1 以下を拒否する。
+//
+// **なぜ独立した述語にするか:** Unix の kill(2) は第 1 引数の符号と値で意味が変わる。
+//
+//	pid > 0        → そのプロセスのみ
+//	-pgid (pgid>1) → そのプロセスグループの全員 ← これが狙い
+//	-1             → 呼び出し元が権限を持つ全プロセス ← アプリごと巻き込んで殺す
+//	0              → 呼び出し元自身のプロセスグループ ← アプリ自身を殺す
+//
+// cmd.Process が異常な pid を持つ経路で符号を反転させると kill(0, ...) や kill(-1, ...) が
+// 成立しうる。requirements.md のセキュリティ要件「停止対象をそのダウンロードのために
+// 起動したプロセスに限定する」に直結するため、反転の前に必ずここを通す。
+// Windows 側でもジョブから列挙した pid の妥当性確認に使う。
+// 詳細は aidlc-docs/inception/application-design/design.md「Kill(-pid) の符号は致命的に危険」を参照。
+func isKillablePID(pid int) bool { return pid > 1 }
+
+// isYtDlpErrorLine は yt-dlp の出力行がエラー行かを返す。
+// 進捗行と混ざった stdout/stderr から、ユーザーに見せるべき行だけを拾うために使う。
+func isYtDlpErrorLine(line string) bool {
+	return strings.HasPrefix(strings.TrimSpace(line), "ERROR:")
+}
+
+// explainDownloadError はダウンロード失敗の理由をユーザー向けの文言にする。
+//
+// 既存の実装は cmd.Wait() の err（"exit status 1"）をそのまま Error に入れていたため、
+// なぜ失敗したのかがユーザーに伝わらなかった。yt-dlp が出したエラー行を使って説明する。
+//
+// m3u8 の 403 は**有効期限切れ**が典型的な原因で、しかも技術的な対策が存在しない
+// （ユーザーが元ページから URL を取り直すしかない）。そのことを明示的に案内する。
+// requirements.md「期限切れ URL」を参照。
+//
+// 戻り値は必ず redactLine を通す。この文言は画面に出るうえ URL コピーで持ち出されるため、
+// トークンを載せてはいけない（SECURITY-03）。
+func explainDownloadError(lastErrLine, url, waitErr string) string {
+	line := strings.TrimSpace(lastErrLine)
+	if line == "" {
+		return waitErr
+	}
+	if strings.Contains(line, "403") {
+		if isM3U8URL(url) {
+			return redactLine("アクセスが拒否されました（403）。m3u8 の URL が失効した可能性があります。" +
+				"元のページから URL を取り直してください。 / " + line)
+		}
+		return redactLine("アクセスが拒否されました（403）。 / " + line)
+	}
+	return redactLine(line)
+}
+
+// IsM3U8URL はフロントエンドから m3u8 判定を参照するための読み取り専用 API。
+//
+// フロントエンド側で `.m3u8` の文字列判定を書くと述語が二重化し、片方だけ直したときに
+// 挙動が食い違う（クエリ付き URL の扱いを間違えるのが典型）。判定は Go の
+// isM3U8URL に一本化する。design.md「判定は 1 つの述語に集約する」を参照。
+func (a *App) IsM3U8URL(url string) bool { return isM3U8URL(url) }
+
 // containsURL は items のいずれかが同一 URL（完全一致）を持つかを返す。
 // 重複登録防止に使う。aidlc-docs/inception/application-design/design.md
 // 「キュー登録（AddToQueue）と重複防止」を参照。
@@ -995,7 +1247,9 @@ func (a *App) PauseDownload(id string) {
 		return
 	}
 	if cmd != nil {
-		suspendProcess(cmd) //nolint:errcheck
+		// ツリー単位で中断する。yt-dlp だけを SIGSTOP すると ffmpeg が
+		// ダウンロードを続け、一時停止したはずが実際には止まらない。
+		suspendProcessTree(cmd) //nolint:errcheck
 	}
 	a.emit(item)
 	a.notify()
@@ -1021,7 +1275,7 @@ func (a *App) ResumeDownload(id string) {
 		return
 	}
 	if cmd != nil {
-		resumeProcess(cmd) //nolint:errcheck
+		resumeProcessTree(cmd) //nolint:errcheck
 	}
 	a.emit(item)
 }
@@ -1053,9 +1307,11 @@ func (a *App) CancelDownload(id string) {
 	if cmd != nil && cmd.Process != nil {
 		// Resume before killing so the process can receive SIGKILL on Unix.
 		if status == "paused" {
-			resumeProcess(cmd) //nolint:errcheck
+			resumeProcessTree(cmd) //nolint:errcheck
 		}
-		cmd.Process.Kill() //nolint:errcheck
+		// ツリー単位で止める。yt-dlp だけを Kill すると ffmpeg が孤児化して
+		// 裏で帯域を食い続け、workDir を RemoveAll しても書き込みが続く。
+		killProcessTree(cmd) //nolint:errcheck
 	}
 
 	if status == "queued" || status == "paused" || status == "error" {
@@ -1121,7 +1377,8 @@ func (a *App) runDownload(item *DownloadItem) {
 	lf := openLogFile()
 	logf := func(format string, v ...any) {
 		if lf != nil {
-			fmt.Fprintf(lf, "[%s] "+format+"\n", append([]any{time.Now().Format("15:04:05.000")}, v...)...)
+			// 組み立ては logLine に一任する（redactLine を通してトークンを残さない）。
+			fmt.Fprint(lf, logLine(time.Now(), format, v...))
 		}
 	}
 	if lf != nil {
@@ -1201,6 +1458,14 @@ func (a *App) runDownload(item *DownloadItem) {
 		}
 	}
 
+	// STEP 2b: m3u8 は取得タイトルが m3u8 のファイル名（master / index など）になるため、
+	// URL から判別可能な保存名を組み立てて上書きする。
+	// design.md「保存名は URL だけから組み立てる（m3u8FileName）」を参照。
+	if resolved := resolveTitle(item.URL, item.Title, time.Now()); resolved != item.Title {
+		logf("[STEP2b] m3u8 のため保存名を URL から生成: %q （取得タイトル %q を使わない）", resolved, item.Title)
+		item.Title = resolved
+	}
+
 	ff := ffmpegPath()
 	if ff != "" {
 		logf("[STEP2] ffmpeg found: %s", ff)
@@ -1251,12 +1516,24 @@ func (a *App) runDownload(item *DownloadItem) {
 	}
 	pw.Close()
 
+	// Start 直後にプロセスツリーの追跡を開始する（Windows は Job Object へ割り当て）。
+	// 非 Windows は applyOSProcAttr の Setpgid で完結しているため no-op。
+	// design.md「プロセス管理（停止は孫プロセスまで及ばせる）」を参照。
+	trackProcessTree(cmd)
+	defer releaseProcessTree(cmd)
+
 	// STEP 3: yt-dlp 実行中
 	logf("[STEP3] yt-dlp started")
+	// 最後に見たエラー行を覚えておく。cmd.Wait() の err は "exit status 1" でしかなく、
+	// なぜ失敗したのかがユーザーに伝わらないため（403 の案内に使う）。
+	var lastErrLine string
 	scanner := bufio.NewScanner(pr)
 	for scanner.Scan() {
 		line := scanner.Text()
 		logf("[STEP3] yt-dlp: %s", line)
+		if isYtDlpErrorLine(line) {
+			lastErrLine = line
+		}
 		parseYtDlpLine(line, item)
 		a.emit(item)
 	}
@@ -1274,7 +1551,9 @@ func (a *App) runDownload(item *DownloadItem) {
 			logf("[STEP3] stopped for yt-dlp update -> requeued")
 		} else if item.Status != "finished" {
 			item.Status = "error"
-			item.Error = err.Error()
+			// "exit status 1" ではなく yt-dlp のエラー行に基づく説明を出す。
+			// m3u8 の 403 は URL の失効が典型なので取り直しを案内する（requirements.md「期限切れ URL」）。
+			item.Error = explainDownloadError(lastErrLine, item.URL, err.Error())
 		}
 		logf("[STEP3] wait error: %v (cancelled=%v)", err, item.isCancelled())
 	} else {
@@ -1552,6 +1831,12 @@ func buildYtDlpArgs(tmpBase, workDir, ffmpegLoc, url string) []string {
 		)
 	} else {
 		args = append(args, "-f", "best[ext=mp4]/best")
+	}
+	// m3u8 URL のときだけ Referer を渡す（m3u8 を配信するサーバは Referer を要求することがあり、
+	// 素の URL では 403 になる）。m3u8 以外に付けると既存の対応サイトの挙動を変えるため付けない。
+	// design.md「Referer は m3u8 URL に限って付与する」を参照。
+	if ref := refererFor(url); ref != "" {
+		args = append(args, "--referer", ref)
 	}
 	args = append(args, "--", url)
 	return args

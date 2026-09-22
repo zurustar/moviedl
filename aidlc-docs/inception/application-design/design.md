@@ -88,15 +88,19 @@ args = append(args, "--", item.URL) // 本ダウンロード
 
 **やってはいけないこと:** `Status == "downloading"` のアイテムだけ止めて更新する。
 
-**なぜか:** 取りこぼす経路が 3 つある。
+**なぜか:** 取りこぼす経路が **4 つ**ある。
 
 | 取りこぼす経路 | 理由 |
 |---|---|
 | 一時停止中のアイテム | 一時停止は `SIGSTOP` / `NtSuspendProcess` による**サスペンド**であり、プロセスは生きている。Windows では実行ファイルを掴んだままなので `os.Rename` での上書きが共有違反で失敗する |
 | `FetchPlaylist` の情報取得 | `cmd` がローカル変数で、Go 側のどこにも記録されていない。「取得中」表示もフロントエンドのローカル状態（`fetching`）でしかない |
 | `runDownload` STEP2a のタイトル取得 | `item.cmd` にセットされる前の別プロセスなので、アイテム経由では停止できない |
+| **yt-dlp が起動する ffmpeg 孫プロセス** | **yt-dlp を停止しても ffmpeg は生き残る。**（2026-09-21 追記。下記「停止は孫プロセスまで及ばせる」を参照） |
 
 **正しい代替手段:** `App` に **yt-dlp プロセスの登録簿**を持ち、yt-dlp を起こす**すべての** `exec.Command` が登録・解除を通る構造にする。`applyOSProcAttr` と `--` 終端と同じ「1 箇所でも漏れたらその経路だけ穴が空く」性質のルールである。登録簿があれば「今 N 件生きている」を正確に数えられ、確認ダイアログの件数も正しくなる。
+
+**ただし登録簿だけでは足りない。** 登録簿が数えるのは yt-dlp プロセスであって、yt-dlp が産む孫プロセスではない。
+停止はプロセス**ツリー**単位で行う必要がある（次節）。
 
 一時停止中のプロセスは **resume してから Kill する**（サスペンド中は SIGKILL を受け取れない）。`CancelDownload` が [app.go](../../../app.go) で既に同じ順序を実装しているので、それに倣う。
 
@@ -208,6 +212,133 @@ ffmpeg がない場合:
 **挙動変更の注意（デグレ観点）**: この対策により、従来は「欠損したまま成功」だった
 ダウンロードが**エラー表示に変わる**。これは意図した改善（壊れたファイルを成功と偽らない）
 だが、ユーザーには再ダウンロードを促す挙動になる点を理解しておくこと。
+
+### m3u8 / HLS
+
+要件は [requirements.md「m3u8（HLS）対応」](../requirements/requirements.md)。
+実測の根拠は [m3u8-feasibility.md](../requirements/m3u8-feasibility.md)。
+
+**前提（実測済み）: 素の VOD m3u8 URL は既存の経路でそのまま動く。** AES-128 暗号化 HLS も、
+映像・音声が別レンディションの master playlist も、既存の `buildYtDlpArgs` の引数のままで成功する。
+したがって **m3u8 専用のダウンロード経路を作ってはいけない。** 追加するのは以下 3 点の補強のみ。
+
+#### 判定は 1 つの述語に集約する（`isM3U8URL`）
+
+m3u8 向けの挙動（Referer 付与・保存名の生成・登録時の警告）は**すべて同じ述語で分岐する**。
+
+```go
+// パスが .m3u8 で終わるか（大小無視）。クエリ文字列は判定に含めない。
+func isM3U8URL(raw string) bool
+```
+
+- 判定は `neturl.Parse` の `Path` に対して行う。**生文字列の `strings.HasSuffix` で判定してはいけない。**
+  m3u8 の URL は `...master.m3u8?token=abc` のようにクエリ付きが普通で、生文字列では末尾が `.m3u8` にならない
+- 述語を 1 つに集約する理由: 3 箇所が別々の判定を持つと、片方だけ直したときに挙動が食い違う
+
+#### Referer は m3u8 URL に限って付与する
+
+**やってはいけないこと:** 全ダウンロードに `--referer` を付ける。
+
+**なぜか:** 既存の 1000 以上の対応サイトは現在 Referer なしで動作している。全 URL に送り始めると
+それらの経路の挙動を変える（デグレ）。`isM3U8URL` が真のときだけ付与すれば、既存サイトの経路には一切触らない。
+
+```go
+// m3u8 URL のオリジン（scheme://host/）を返す。m3u8 でない・不正な URL なら "" を返す。
+func refererFor(raw string) string
+```
+
+- `buildYtDlpArgs` は URL から自分で導出する（引数は増やさない）。純粋関数のまま保つため
+- **導出結果も引数インジェクション対策を通す。** `refererFor` は `scheme://host/` の形しか返さないため
+  構造上 `-` 始まりにはならないが、`isValidURL` と同じ検証（http / https かつホストあり）を通してから返す。
+  「`--` 終端と多層で守る」という既存方針と同じ（[引数インジェクション対策](#) の節を参照）
+- 視聴ページが別ドメインのサイトには効かない。これは既知の限界として受け入れる
+
+#### 保存名は URL だけから組み立てる（`m3u8FileName`）
+
+**問題:** HLS の m3u8 にはタイトルのメタデータがない。そのため STEP2a の `--dump-json` が返す `title` は
+**m3u8 のファイル名そのもの**（`master` / `index` / `playlist` / `chunklist`）になり、保存名が
+`master.mp4` に集中する。2 本目以降は `uniqueDest` により `master (1).mp4` になって中身が判別できない。
+
+```go
+// ホスト名 + 意味のあるパス要素 + 日時 を "_" で連ねた拡張子なしの base 名を返す。
+func m3u8FileName(raw string, now time.Time) string
+```
+
+- 構成: `<host>_<意味のあるパス要素>_<yyyymmdd-hhmm>`
+  例: `https://vod.example.com/hls/ab12cd/master.m3u8` → `vod.example.com_ab12cd_20260921-0915`
+- **「意味のあるパス要素」の決め方**: パス要素から最後の要素（`.m3u8` のファイル名）を除き、
+  残りを**末尾から走査して、汎用語の集合に含まれない最初の要素**を採用する。見つからなければ省略する。
+  汎用語の集合は `hls` / `stream` / `streams` / `media` / `video` / `videos` / `playlist` / `manifest` /
+  `out` / `vod` とする（小文字化して比較）
+- **クエリ文字列は保存名に含めない。** トークンが延々と付いた読めない名前になるうえ、
+  ログのマスク方針（後述）と矛盾する
+- 戻り値は拡張子を含めない。呼び出し側（`runDownload` STEP5）が既存どおり実体の拡張子を付ける
+- 最終的に `sanitizeFilename` を通す経路は既存のまま（制御文字・Windows 予約名の処理を二重に書かない）
+
+**適用箇所:** STEP2a の直後に、`isM3U8URL(item.URL)` が真なら `item.Title` を `m3u8FileName` の値で
+**上書きする**。STEP2a のタイトル事前取得そのものは残す（到達性の確認とログに価値があり、流れを変えない方が安全）。
+
+**なぜ「title が汎用語のときだけ上書き」にしないか:** パスが `.m3u8` で終わる URL は generic
+エクストラクターが処理し、`title` は必ず m3u8 のファイル名になる（実測）。条件を足すと
+「どちらの名前が使われるか」が URL によって変わり、純粋関数で決まらなくなる。
+
+#### ログにトークン付き URL を残さない（`redactLine`）
+
+**やってはいけないこと:** yt-dlp のコマンド行や出力行をそのままログに書く。
+
+**なぜか:** `moviedl.log`（`os.UserConfigDir()/moviedl/` 内・0644・平文）には実行コマンド全体と
+yt-dlp の出力行が追記される。m3u8 の URL は**有効期限トークンが実質的な認可情報**であり、
+クエリ文字列ごと平文で残るのは機微情報の出力にあたる（SECURITY-03）。
+
+```go
+// 文字列中の http(s) URL のクエリ部分を "?<redacted>" に置き換える。
+func redactLine(s string) string
+```
+
+- 適用箇所は **`logf` に渡す前**の 2 箇所: STEP2 のコマンド行、STEP3 の yt-dlp 出力行
+- URL の**パスは残す**（どのファイルで失敗したかの調査に必要）。落とすのはクエリだけ
+- 文字列操作のみで実装し `neturl.Parse` に依存しない（パース不能な行でも確実にマスクするため）
+- **冪等**であること（二重適用しても結果が変わらない）。ログ経路が増えても壊れない
+
+#### 期限切れ URL
+
+m3u8 の URL は有効期限トークン付きのことが多く、失効すると 403 になる。**技術的な対策はない。**
+
+- 同時ダウンロード数 0（登録のみモード）で m3u8 を登録したときに、フロントエンドが警告を出す
+- 403 で失敗したときのエラー文言で、URL 失効の可能性と取り直しを案内する
+- **`maxActive == 0` に m3u8 の特別分岐を足してはいけない**（「maxActive == 0（登録のみモード）」の節を参照）。
+  警告は表示のみで、開始の判断はユーザーに残す
+
+#### テスト可能プロパティ（PBT-01）
+
+追加する純粋関数はいずれも「任意の URL 文字列」を入力に取るため、ランダム生成した URL に対する
+不変条件の検証価値が高い。ジェネレータは URL の構成要素（スキーム・ホスト・パス要素・クエリ）から
+**構造的に妥当な URL を組み立てる専用ジェネレータ**を用意する（PBT-07。生の文字列を URL として渡さない）。
+
+| 対象 | カテゴリ | プロパティ |
+|---|---|---|
+| `isM3U8URL` | Invariant（クエリ非依存） | 同じ URL にクエリを足しても判定結果が変わらない（`...master.m3u8` と `...master.m3u8?token=x` は同じ判定） |
+| `isM3U8URL` | Invariant（大小無視） | パス末尾の `.m3u8` / `.M3U8` / `.M3u8` は同じ判定になる |
+| `refererFor` | Invariant（引数インジェクション） | **戻り値は決して `-` で始まらない**。任意の入力で成立すること |
+| `refererFor` | Invariant（対応関係） | 非空を返すのは `isM3U8URL` が真かつ `isValidURL` が真のときだけ |
+| `refererFor` | Invariant（オリジンのみ） | 戻り値にパス要素・クエリ・フラグメントが含まれない |
+| `m3u8FileName` | Invariant（安全なファイル名） | `sanitizeFilename` を通した結果が元と一致する（= 既に安全）。パス区切り・制御文字を含まない |
+| `m3u8FileName` | Invariant（機微情報） | **戻り値にクエリ文字列由来の文字が含まれない**（トークンが保存名に漏れない） |
+| `m3u8FileName` | Invariant（非空） | 任意の m3u8 URL に対し空文字を返さない（空だと `runDownload` が `tmpBase` のままの名前で保存してしまう） |
+| `redactLine` | Idempotence | `redactLine(redactLine(s)) == redactLine(s)`。ログ経路が増えても二重適用で壊れない |
+| `redactLine` | Invariant（マスクの網羅） | 出力に、入力の URL が持っていたクエリ文字列がそのまま現れない |
+| `redactLine` | Invariant（保存） | URL を含まない行は一切変化しない |
+| `isKillablePID` | Invariant（範囲制約） | 真を返すのは `pid > 1` のときだけ（詳細は「プロセス管理」の節） |
+
+PBT は例示ベーステストを置き換えず併存させる（PBT-10）。ファイルは既存どおり `pbt_test.go` に分離する。
+
+#### 対象外
+
+| 項目 | 理由 |
+|---|---|
+| ライブ配信の録画（停止してそこまでを保存） | 中断時の出力が 0 バイト・再生不能になることを実測で確認（「プロセス管理」の節を参照） |
+| ローカルの .m3u8 ファイル | 対象はインターネット上の URL（ユーザー判断） |
+| DRM（Widevine / FairPlay / PlayReady） | 復号できない。`has_drm` で判別可能 |
 
 ---
 
@@ -392,17 +523,126 @@ func (a *App) RetryDownload(id string)
 | macOS / Linux | `cmd.Process.Signal(syscall.SIGSTOP)` | `cmd.Process.Signal(syscall.SIGCONT)` |
 | Windows | `NtSuspendProcess` (syscall 経由) | `NtResumeProcess` (syscall 経由) |
 
-実装は `sysproc_windows.go` / `sysproc_other.go` に分けて定義する:
+実装は `sysproc_windows.go` / `sysproc_other.go` に分けて定義する。
+**ただし対象は単一プロセスではなくプロセスツリーである**（次節）。
+
+---
+
+## プロセス管理（停止は孫プロセスまで及ばせる）
+
+**この節は 2026-09-21 の m3u8 実現可能性評価で発見した既存不具合への対策である。**
+経緯と実測ログは [m3u8-feasibility.md](../requirements/m3u8-feasibility.md)「注目点 3」を参照。
+
+### ライブ HLS は ffmpeg に委譲される（＝ yt-dlp は末端プロセスではない）
+
+**やってはいけないこと:** `cmd.Process.Kill()` や `cmd.Process.Signal(SIGSTOP)` で
+**yt-dlp のプロセスだけ**を停止して、それで止まったと考える。
+
+**なぜか:** yt-dlp は処理内容によって **ffmpeg を子プロセスとして起動し、そちらに処理を丸投げする**。
+
+| 委譲が起きる場面 | ffmpeg の生存時間 |
+|---|---|
+| **ライブ HLS のダウンロード** | **配信が続く限り数時間**（`-c copy -f mpegts` で `.part` に書き続ける） |
+| 映像・音声の結合（`[Merger]`） | 数秒〜数十秒 |
+| MPEG-TS の MP4 コンテナ修正（`[FixupM3u8]`） | 数秒 |
+
+そして `applyOSProcAttr` は**非 Windows では no-op**で、プロセスグループを作っていなかった。
+Windows 側も `HideWindow: true` だけで Job Object を使っていなかった。
+このため **SIGKILL は yt-dlp にしか届かず、ffmpeg は `PPID 1` の孤児として生き残り処理を続ける**
+（実測で確認。yt-dlp PID 57658 を SIGKILL → 子 ffmpeg 57660 が生存継続）。
+
+現状の症状:
+
+| 操作 | 実際に起きていたこと |
+|---|---|
+| キャンセル | yt-dlp だけ死に、ffmpeg が裏で帯域を食い続ける。`workDir` を `RemoveAll` しても書き込みが続く |
+| 一時停止 | yt-dlp だけ止まり、**ffmpeg はダウンロードを続ける**（止まっていない） |
+| yt-dlp の更新 | `waitProcsDrained` は yt-dlp の生存だけを見るため、**ffmpeg が実行ファイルを掴んだままでも「排出完了」と判定する**（Windows では置き換えが共有違反で失敗しうる） |
+
+**これは m3u8 固有でもライブ固有でもない。** VOD でも `[Merger]` / `[FixupM3u8]` の最中にキャンセルすれば
+同じ経路を通る（後処理が短命なので目立たなかっただけ）。
+
+### 正しい代替手段: OS ごとのプロセスツリー抽象
+
+`app.go` から OS 差分を見えなくするため、以下の 5 関数を `sysproc_*.go` に定義する。
+**`suspendProcess` / `resumeProcess`（単一プロセス版）は廃止し、ツリー版に置き換える。**
 
 ```go
-// sysproc_other.go
-func suspendProcess(cmd *exec.Cmd) error { return cmd.Process.Signal(syscall.SIGSTOP) }
-func resumeProcess(cmd *exec.Cmd) error  { return cmd.Process.Signal(syscall.SIGCONT) }
-
-// sysproc_windows.go
-func suspendProcess(cmd *exec.Cmd) error { /* NtSuspendProcess */ }
-func resumeProcess(cmd *exec.Cmd) error  { /* NtResumeProcess  */ }
+func applyOSProcAttr(cmd *exec.Cmd)          // Start 前。非 Windows: Setpgid / Windows: HideWindow
+func trackProcessTree(cmd *exec.Cmd)         // Start 直後。Windows: Job Object を作って割り当て。非 Windows: no-op
+func killProcessTree(cmd *exec.Cmd) error    // ツリー全体に SIGKILL / TerminateJobObject
+func suspendProcessTree(cmd *exec.Cmd) error // ツリー全体を中断
+func resumeProcessTree(cmd *exec.Cmd) error  // ツリー全体を再開
+func releaseProcessTree(cmd *exec.Cmd)       // Wait 後。Windows: ジョブハンドルを閉じる。非 Windows: no-op
 ```
+
+**`applyOSProcAttr` と同じ「1 箇所でも漏れたらその経路だけ穴が空く」ルールである。**
+`exec.Command` を追加するときは `applyOSProcAttr` → `Start` → `trackProcessTree` の順を必ず通し、
+停止はツリー版の関数を使うこと。
+
+### ⚠️ 非 Windows: `Kill(-pid)` の符号は致命的に危険
+
+**やってはいけないこと:** ガードなしで `syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)` を呼ぶ。
+
+**なぜか:** `kill(2)` の第 1 引数の意味は符号と値で変わる。
+
+| 引数 | 意味 |
+|---|---|
+| `pid > 0` | そのプロセスのみ |
+| `-pgid`（`pgid > 1`） | そのプロセスグループの全員 ← **これが狙い** |
+| **`-1`** | **呼び出し元が権限を持つ全プロセス** ← **アプリごと巻き込んで殺す** |
+| `0` | 呼び出し元自身のプロセスグループ ← **アプリ自身を殺す** |
+
+`cmd.Process` が `nil` だったり、`Pid` が 0 / 1 になっている経路で符号を反転させると、
+`kill(0, ...)` や `kill(-1, ...)` が成立しうる。これは requirements.md のセキュリティ要件
+「停止対象をそのダウンロードのために起動したプロセスに限定する」に直接違反する。
+
+**正しい代替手段:** 符号を反転させる前に必ずガードする。判定は純粋関数に切り出してテストで固定する。
+
+```go
+// ツリー停止の対象として正当な pid か。1 以下は拒否する。
+// Unix ではこの pid を pgid として符号反転に使い、Windows ではジョブから
+// 列挙した pid の妥当性確認に使う（両 OS 共通なので app.go に置く）。
+func isKillablePID(pid int) bool { return pid > 1 }
+```
+
+`Setpgid: true` を付けた子は**自分自身がグループリーダー**になるため `pgid == cmd.Process.Pid` が成り立つ。
+別途 `Getpgid` を引く必要はない（引けば、プロセスが既に消えていたときにエラーで分岐が増える）。
+
+### Windows: Job Object と、割り当ての競合窓
+
+- `CreateJobObjectW` でジョブを作り、`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` を設定して
+  `AssignProcessToJobObject` で yt-dlp を入れる。停止は `TerminateJobObject` でツリー全体に及ぶ
+- 中断・再開はジョブに機能がないため、`QueryInformationJobObject`（`JobObjectBasicProcessIdList`）で
+  ジョブ内の PID を列挙し、各 PID に既存の `NtSuspendProcess` / `NtResumeProcess` を適用する
+- **既知の競合窓:** 割り当ては `cmd.Start()` の**直後**に行うため、Start から Assign までの
+  わずかな間に yt-dlp が子を産むと、その子はジョブに入らない。実際には yt-dlp（Python）の起動に
+  時間がかかり ffmpeg を産むのはその後なので実用上は問題にならない。厳密に閉じるには
+  `CREATE_SUSPENDED` で起動してから割り当てて再開する必要があるが、`os/exec` は
+  スレッドハンドルを公開しないため現状の Go 標準ライブラリでは実装できない
+- 既存の `HideWindow: true` は維持する（コンソールウィンドウ抑止。別の節を参照）
+
+### ライブを停止すると成果物は残らない（`.part` が 0 バイトになる）
+
+**やってはいけないこと:** 「ライブを停止したらそこまでの分が保存される」と期待する実装・UI にする。
+
+**なぜか:** ライブでは ffmpeg が `.part` に書いており、`SIGKILL` / `TerminateJobObject` では
+**出力バッファがフラッシュされない**。実測では停止後の `.part` は **0 バイト**で、
+`ffprobe` が `Invalid data found` を返す（救出不能）。
+
+対照的に **VOD（hlsnative）で中断した `.part` は救出できる**。実測では 59,220 バイトの valid な
+MPEG-TS で、`ffprobe` が読めて `ffmpeg -c copy` で再生可能な mp4 になった。
+
+したがって「停止してそこまでを保存」を実装するなら、ライブについては
+**`SIGKILL` ではなく `SIGINT` / `SIGTERM`（または stdin へ `q`）を孫の ffmpeg に届ける**必要がある。
+**現時点ではライブの録画は対象外**であり、この非対称性を知らずに「停止して保存」を作ると
+ライブだけ 0 バイトのファイルが残る実装になる。
+
+### テスト可能プロパティ（PBT-01）
+
+| 対象 | カテゴリ | プロパティ |
+|---|---|---|
+| `isKillablePID` | Invariant（範囲制約） | 任意の `int` に対し、真を返すのは `pid > 1` のときだけ。とくに `0` / `1` / 負数では必ず偽 |
 
 ---
 
