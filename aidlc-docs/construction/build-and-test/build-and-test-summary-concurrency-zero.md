@@ -87,3 +87,24 @@ go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
 go test -race ./...
 ok  	moviedl	(cached)
 ```
+
+---
+
+## PBT コンプライアンス（Property-Based Testing / Full 強制）
+
+| ルール | 判定 | 根拠 |
+|---|---|---|
+| PBT-01 プロパティ特定 | Compliant | `design.md`「テスト可能プロパティ（PBT-01）」に 7 プロパティを categoryed 記載し、[code-generation-plan-concurrency-zero.md](../plans/code-generation-plan-concurrency-zero.md) から参照 |
+| PBT-02 ラウンドトリップ | N/A | 今回の変更対象に逆関数を持つ操作（直列化・符号化・パース）はない |
+| PBT-03 不変条件 | Compliant | 範囲制約（0〜10）・要素保存・順序保存・副作用なしを PBT で検証 |
+| PBT-04 冪等性 | Compliant | `TestPropSetMaxConcurrentIdempotent` |
+| PBT-05 Oracle | Compliant | `TestPropSelectToStartCountMatchesOracle`（件数の参照計算と比較） |
+| PBT-06 ステートフル PBT | N/A | 今回変更した状態は単一 int（`maxActive`）で、コマンド列に依存する遷移を持たない。`items` の遷移はダウンロード実行（外部プロセス）と不可分で単体では回せない |
+| PBT-07 ジェネレータ品質 | Compliant | `genStatus` は実在 `Status` のみ、`genItems` は構造的に妥当なスライス、`genAnyConcurrency` は境界外・極値を含む。生プリミティブのみのジェネレータは使用していない |
+| PBT-08 shrink と再現性 | Compliant | rapid のデフォルト shrink を無効化していない。失敗時に `-rapid.seed=N` が出力されることをミューテーションで実証。CI は `RAPID_SEED=${{ github.run_id }}` を出力（`.github/workflows/ci.yml`） |
+| PBT-09 フレームワーク選定 | Compliant | `pgregory.net/rapid v1.3.0`（`go.mod`）。カスタムジェネレータ・shrink・シード再現・`go test` 統合をすべて満たす |
+| PBT-10 例示ベースとの併存 | Compliant | `pbt_test.go` を分離。0 の保持・既定 0・0 で自動補充しない・0 で実行中を止めないの各シナリオに例示ベーステストが存在 |
+
+**Blocking PBT findings: なし**
+
+（この表は当初 aidlc-state.md に記録していたものを、2026-09-23 のドキュメント整理で要件 1 のテスト結果である本ファイルへ移した。内容は変更していない。）

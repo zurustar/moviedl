@@ -24,7 +24,7 @@
 ローカルに HTTP サーバ（`python3`）を立て、実サイトによくある配信条件を再現した。
 素材は ffmpeg で生成した合成テスト映像（`testsrc` + `sine` トーン）で、実在コンテンツは一切使っていない。
 
-実行した yt-dlp の引数は **[buildYtDlpArgs](../../../app.go) が組み立てるものと同一**にした（`--retries 10`
+実行した yt-dlp の引数は **[buildYtDlpArgs](../../../download.go) が組み立てるものと同一**にした（`--retries 10`
 `--fragment-retries 10` `--abort-on-unavailable-fragment` `--socket-timeout 30`
 `-f bestvideo+bestaudio/best` `--merge-output-format mp4` など）。つまり以下は「現行アプリが
 その URL を渡されたらどうなるか」の再現である。

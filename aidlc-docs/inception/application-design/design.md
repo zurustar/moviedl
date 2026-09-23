@@ -102,7 +102,7 @@ args = append(args, "--", item.URL) // 本ダウンロード
 **ただし登録簿だけでは足りない。** 登録簿が数えるのは yt-dlp プロセスであって、yt-dlp が産む孫プロセスではない。
 停止はプロセス**ツリー**単位で行う必要がある（次節）。
 
-一時停止中のプロセスは **resume してから Kill する**（サスペンド中は SIGKILL を受け取れない）。`CancelDownload` が [app.go](../../../app.go) で既に同じ順序を実装しているので、それに倣う。
+一時停止中のプロセスは **resume してから Kill する**（サスペンド中は SIGKILL を受け取れない）。`CancelDownload` が [queue.go](../../../queue.go) で既に同じ順序を実装しているので、それに倣う。
 
 ##### 停止したダウンロードは 0% からやり直しになる
 
@@ -216,7 +216,7 @@ ffmpeg がない場合:
 ### m3u8 / HLS
 
 要件は [requirements.md「m3u8（HLS）対応」](../requirements/requirements.md)。
-実測の根拠は [m3u8-feasibility.md](../requirements/m3u8-feasibility.md)。
+実測の根拠は [feasibility-m3u8.md](../requirements/feasibility-m3u8.md)。
 
 **前提（実測済み）: 素の VOD m3u8 URL は既存の経路でそのまま動く。** AES-128 暗号化 HLS も、
 映像・音声が別レンディションの master playlist も、既存の `buildYtDlpArgs` の引数のままで成功する。
@@ -619,7 +619,7 @@ func (a *App) RetryDownload(id string)
 ## プロセス管理（停止は孫プロセスまで及ばせる）
 
 **この節は 2026-09-21 の m3u8 実現可能性評価で発見した既存不具合への対策である。**
-経緯と実測ログは [m3u8-feasibility.md](../requirements/m3u8-feasibility.md)「注目点 3」を参照。
+経緯と実測ログは [feasibility-m3u8.md](../requirements/feasibility-m3u8.md)「注目点 3」を参照。
 
 ### ライブ HLS は ffmpeg に委譲される（＝ yt-dlp は末端プロセスではない）
 
@@ -652,7 +652,7 @@ Windows 側も `HideWindow: true` だけで Job Object を使っていなかっ�
 
 ### 正しい代替手段: OS ごとのプロセスツリー抽象
 
-`app.go` から OS 差分を見えなくするため、以下の 5 関数を `sysproc_*.go` に定義する。
+OS に依存しない側（`procs.go` / `download.go` / `queue.go`）から OS 差分を見えなくするため、以下の関数を `sysproc_*.go` に定義する。
 **`suspendProcess` / `resumeProcess`（単一プロセス版）は廃止し、ツリー版に置き換える。**
 
 ```go
@@ -690,7 +690,7 @@ func releaseProcessTree(cmd *exec.Cmd)       // Wait 後。Windows: ジョブハ
 ```go
 // ツリー停止の対象として正当な pid か。1 以下は拒否する。
 // Unix ではこの pid を pgid として符号反転に使い、Windows ではジョブから
-// 列挙した pid の妥当性確認に使う（両 OS 共通なので app.go に置く）。
+// 列挙した pid の妥当性確認に使う（両 OS 共通なので procs.go に置く）。
 func isKillablePID(pid int) bool { return pid > 1 }
 ```
 

@@ -1,7 +1,7 @@
 # Workflow Plan — m3u8（HLS）対応
 
 要件は [requirements.md](../requirements/requirements.md)「m3u8（HLS）対応」節。
-実現可能性の実測根拠は [m3u8-feasibility.md](../requirements/m3u8-feasibility.md)。
+実現可能性の実測根拠は [feasibility-m3u8.md](../requirements/feasibility-m3u8.md)。
 
 ---
 

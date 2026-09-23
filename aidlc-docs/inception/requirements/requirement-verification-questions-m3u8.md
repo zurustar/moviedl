@@ -5,7 +5,7 @@
 確定した要件は [requirements.md](requirements.md) の「m3u8（HLS）対応」節に転記済み。
 
 **前提**: 実現可能性の評価は完了しています。判定と実測結果は
-[m3u8-feasibility.md](m3u8-feasibility.md) を参照してください。結論は
+[feasibility-m3u8.md](feasibility-m3u8.md) を参照してください。結論は
 **「実行可能。ただし第 1 層（素の VOD m3u8 URL）はすでに動いており、
 第 3 層（ライブ）は既存の停止機構の欠陥を露出させる」** です。
 
@@ -21,7 +21,7 @@
 ## Q1: 今回、何を作りますか？（最重要）— ✅ 回答済み
 
 A) m3u8 を普通に使えるようにするだけ（ファイル名・Referer・期限切れ案内）
-B) **A + 見つけた既存バグも直す** — キャンセル・一時停止・yt-dlp 更新が **ffmpeg 孫プロセスに効いていない**問題も修正する（[m3u8-feasibility.md](m3u8-feasibility.md) 注目点 3）
+B) **A + 見つけた既存バグも直す** — キャンセル・一時停止・yt-dlp 更新が **ffmpeg 孫プロセスに効いていない**問題も修正する（[feasibility-m3u8.md](feasibility-m3u8.md) 注目点 3）
 C) 既存バグの修正だけ先にやる
 D) 全部やる（A + B + ライブ配信の録画）
 X) Other (please describe after [Answer]: tag below)
@@ -42,7 +42,7 @@ X) Other (please describe after [Answer]: tag below)
 ## Q2: 保存ファイル名はどうしますか？
 
 HLS の m3u8 にはタイトルのメタデータがありません。そのため現状は保存名が `master.mp4` / `index.mp4` に集中し、
-2 本目以降は [uniqueDest](../../../app.go) によって `master (1).mp4` になって**中身が判別できません**。
+2 本目以降は [uniqueDest](../../../filename.go) によって `master (1).mp4` になって**中身が判別できません**。
 
 A) 現状のまま — m3u8 のファイル名ベース（`master.mp4`）。重複時は `(1)` が付く
 B) **【推奨】自動でより区別しやすい名前を組み立てる** — URL から取れる情報だけで組む。
@@ -64,7 +64,7 @@ TDD / PBT を回しやすく、既存フローに一切触らない。B の名�
 ## Q3: Referer（元ページの URL）の指定方法はどうしますか？
 
 実測で、Referer を要求するサーバは `--referer` を 1 個渡すだけで 403 が解消しました
-（[m3u8-feasibility.md](m3u8-feasibility.md) シナリオ 5→6）。渡し方の選択です。
+（[feasibility-m3u8.md](feasibility-m3u8.md) シナリオ 5→6）。渡し方の選択です。
 
 A) **登録時に任意入力** — URL 入力欄の隣に「元ページ URL（任意）」欄を置き、入力があれば `--referer` に渡す
 B) **【推奨】m3u8 URL から自動推定** — m3u8 の URL のオリジン（`https://example.com/`）を Referer として送る。

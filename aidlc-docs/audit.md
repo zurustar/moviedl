@@ -247,3 +247,17 @@ PBT を 6 件追加（addRejection の Oracle、addRejectionMessage の沈黙禁
 
 ---
 
+## 作業 6: リポジトリ構成の整理
+**Timestamp**: 2026-09-23T00:00:00Z
+**User Input**: "ディレクトリ構成がきたなくないですか？これが普通なの？" / "全部やって"
+**AI Response**: "構成を調べ、普通なもの（Wails 標準の Go ルート直置き、ツール用フォルダ、gitignore 済みの実行ファイル）と本物の問題（app.go が 2065 行で全機能を抱えている／aidlc-docs の成果物名が要件ごとにバラバラ）を切り分けて報告し、A（app.go の役割別分割）→ B（成果物名の統一）を提案。承認を受けて両方を実施した。
+
+A: go/ast で宣言ごとの行範囲（doc コメント込み）を取る解析ツールを作業用に作り、app.go の 114 宣言を 12 ファイル（app / queue / download / progress / urls / filename / workdir / logging / procs / ytdlp / ffmpeg / checksum）へスクリプトで振り分けた。手作業の切り貼りを避けたのは取りこぼしを防ぐため。別名 import（wailsruntime / goruntime / neturl）は goimports が推測できないため補った。分割前（git HEAD の app.go）と分割後で宣言本文を照合し 114 件が 1 文字も変わっていないことを確認。テストも同じ方法で app_test.go / helpers_test.go の 44 宣言を 12 個の *_test.go へ分け、本文の同一性とテスト一覧 81 件の完全一致を確認した。pbt_test.go は PBT-10（例示ベースと分離）に従い分割しなかった。make check と GOOS=windows の build / vet は通過。app.go は 222 行になった。
+
+B: aidlc-docs の 6 ファイルを要件の略称を末尾に付ける規則に git mv で改名（要件 1 = concurrency-zero、要件 3 の質問 = m3u8、実現可能性 = feasibility-m3u8）。AI-DLC のフォルダ骨組み（inception / construction）は CLAUDE.md で最優先とされる構成規則なので変えていない。requirement-verification-questions.md は書かれた時期で指す中身が違うため一括置換せず、m3u8-feasibility.md への参照と、移動した関数を指す app.go へのリンク 3 件だけを張り替えた。作業記録（実装計画・テスト結果・audit.md）の本文中の旧ファイル名は、当時の記録なので書き換えていない。aidlc-docs/README.md（要件と成果物の対応表）を追加。aidlc-state.md は要件を足すたびに継ぎ足した結果、古い『承認待ち』『コミット未実施』などが残っていたため要件一覧を中心に書き直し、そこにしかなかった要件 1 の PBT 適合表は要件 1 のテスト結果ファイルへ内容を変えずに移した。Markdown 19 ファイルの相対リンクを機械的に検査し、実在のリンク切れがないことを確認した。
+
+付随して見つけた既存の誤り: CONTRIBUTING.md が存在しない embed.go / embedded/ を載せ、『リリースビルドで ffmpeg を同梱』『macOS 版は universal』と書いていたが、release.yml を確認するとどちらも事実と異なった（ffmpeg は同梱せず、macOS は darwin/arm64 のみ）。実態に合わせて直した。また frontend/wailsjs/go/models.ts は前回手で追記した際に空行のタブを落としていたため、生成器の出力（タブ入り）が正として取り込んだ。"
+**Context**: CONSTRUCTION - Code Generation（作業 6・動作変更なし）
+
+---
+

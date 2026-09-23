@@ -7,7 +7,7 @@ moviedl の開発環境セットアップとビルド方法、リポジトリ構
 - Go 1.25 以上
 - [Wails v2](https://wails.io) (`go install github.com/wailsapp/wails/v2/cmd/wails@latest`)
 - macOS / Linux の場合: Xcode Command Line Tools / WebKitGTK
-- ffmpeg（ローカル開発時。リリースビルドではバイナリに同梱される）
+- ffmpeg（ローカル開発時。macOS は Homebrew で入れる。リリースビルドには同梱しない）
 
 ## ビルド
 
@@ -60,26 +60,45 @@ make install-hooks   # git config core.hooksPath .githooks を設定
 
 ## リポジトリ構成
 
+Go のコードはすべて `package main` です（Wails v2 の標準構成）。パッケージは分けず、
+**役割ごとにファイルを分けています**。テストは対応するソースと同じ名前の `*_test.go` に置きます。
+
 ```
 moviedl/
-├── app.go              バックエンドのメイン: ダウンロード処理、IPC メソッド
-├── main.go             Wails 起動エントリ
-├── embed.go            embedded/ ディレクトリの埋め込み宣言
-├── sysproc_*.go        プロセスサスペンド・コンソール非表示のプラットフォーム別実装
-├── frontend/index.html 単一ファイルのフロントエンド（フレームワーク・ビルドステップなし）
-├── embedded/           リリースビルド時に ffmpeg バイナリが配置される（gitignore 対象）
-├── *_test.go           ユニットテスト（純粋関数中心）
+├── main.go             Wails 起動エントリ（バージョン情報の埋め込みを含む）
+├── app.go              App 本体: 状態・scheduler・フロントエンドへの通知・アプリ情報
+├── queue.go            URL の登録（重複・不正 URL の拒否理由を返す）と、開始・一時停止・再開・キャンセル・リトライ
+├── download.go         1 件のダウンロードの実行（runDownload）と yt-dlp 引数の組み立て
+├── progress.go         yt-dlp の進捗行の解析と、経過時間・長さの表示整形
+├── urls.go             URL の検証、m3u8 判定、Referer の決定（引数インジェクション対策を含む）
+├── filename.go         保存ファイル名の決定（タイトル・m3u8 の生成名・安全化・重複回避）
+├── workdir.go          ダウンロードごとの作業ディレクトリの記録と、起動時の残骸掃除
+├── logging.go          moviedl.log への記録（セッション管理・トークンのマスク）
+├── procs.go            yt-dlp プロセスの登録簿と、孫プロセスまで及ぶ停止
+├── sysproc_other.go    プロセス停止の macOS / Linux 実装（プロセスグループ）
+├── sysproc_windows.go  プロセス停止の Windows 実装（Job Object）とコンソール非表示
+├── ytdlp.go            yt-dlp の配置・インストール・更新
+├── ffmpeg.go           ffmpeg の探索と、Windows 向けのアプリ内インストール
+├── checksum.go         取得したバイナリの SHA256 照合（yt-dlp / ffmpeg 共通）
+├── *_test.go           例示ベーステスト（ソースと同名で対応）
+├── pbt_test.go         プロパティベーステスト（pgregory.net/rapid。例示ベースと分離）
+├── frontend/
+│   ├── index.html      単一ファイルのフロントエンド（フレームワーク・ビルドステップなし）
+│   └── wailsjs/        Wails が生成する IPC バインディング（index.html は直接使っていない）
+├── build/              Wails のビルド設定（アイコン・Info.plist）。build/bin/ は gitignore 対象
 ├── Makefile            build / check / fmt / install-hooks などのタスク
 ├── .githooks/pre-push  push 前に make check を走らせるフック（install-hooks で有効化）
 ├── .aidlc-rule-details/  AI-DLC ワークフローのルール詳細（CLAUDE.md 第 2 部が参照）
-├── aidlc-docs/         ドキュメント（AI-DLC 構造）
-│   └── inception/
-│       ├── requirements/requirements.md  要件定義（ユーザー視点での仕様）
-│       └── application-design/design.md  設計書（実装上の意思決定とピットフォール）
+├── aidlc-docs/         ドキュメント（AI-DLC 構造）。一覧は aidlc-docs/README.md
+│   ├── inception/requirements/requirements.md  要件定義（ユーザー視点での仕様）
+│   └── inception/application-design/design.md  設計書（実装上の意思決定とピットフォール）
 └── .github/workflows/
     ├── ci.yml          push / PR で make check を実行する CI
     └── release.yml     v* タグ push でビルドする CI
 ```
+
+ffmpeg はバイナリに同梱しません（以前は Windows 版に埋め込んでいましたが、ウイルス対策ソフトの誤検知を招くためやめました。
+経緯は design.md「なぜ Windows で埋め込みをやめたか」）。
 
 ## アーキテクチャ概要
 
@@ -96,7 +115,7 @@ moviedl/
 
 | ジョブ | ランナー | 成果物 |
 |---|---|---|
-| `build-macos` | `macos-latest` | `moviedl-macos.zip`（universal: arm64 + amd64） |
+| `build-macos` | `macos-latest` | `moviedl-macos.zip`（arm64。Intel Mac 向けのユニバーサル版はローカルの `make build-universal` で作る） |
 | `build-windows` | `windows-latest` | `moviedl-windows.zip` |
 
-CI が `embedded/` にプラットフォーム固有の ffmpeg バイナリを配置してから `wails build` を実行するため、ffmpeg はバイナリに同梱されます。完成した zip は `release` ジョブが GitHub Release にアップロードします。
+どちらも `wails build` をそのまま実行します。ffmpeg はバイナリに同梱しません（Windows はアプリ初回起動後に `InstallFfmpeg` で取得、macOS は Homebrew を案内）。完成した zip は `release` ジョブが GitHub Release にアップロードします。
