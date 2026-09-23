@@ -1,4 +1,13 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(go test *)",
+      "Bash(go build *)",
+      "Bash(make check *)",
+      "Bash(go vet *)",
+      "Bash(gofmt -l .)"
+    ]
+  },
   "enabledPlugins": {
     "security-guidance@claude-plugins-official": true
   }
