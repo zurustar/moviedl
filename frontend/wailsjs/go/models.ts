@@ -1,5 +1,21 @@
 export namespace main {
-	
+
+	export class AddResult {
+	    id: string;
+	    reason: string;
+	    message: string;
+
+	    static createFrom(source: any = {}) {
+	        return new AddResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.reason = source["reason"];
+	        this.message = source["message"];
+	    }
+	}
 	export class PlaylistEntry {
 	    id: string;
 	    url: string;

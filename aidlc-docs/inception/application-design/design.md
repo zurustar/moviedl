@@ -250,7 +250,7 @@ func refererFor(raw string) string
 - `buildYtDlpArgs` は URL から自分で導出する（引数は増やさない）。純粋関数のまま保つため
 - **導出結果も引数インジェクション対策を通す。** `refererFor` は `scheme://host/` の形しか返さないため
   構造上 `-` 始まりにはならないが、`isValidURL` と同じ検証（http / https かつホストあり）を通してから返す。
-  「`--` 終端と多層で守る」という既存方針と同じ（[引数インジェクション対策](#) の節を参照）
+  「`--` 終端と多層で守る」という既存方針と同じ（上記「引数インジェクション対策（`--` 終端は必須）」の節を参照）
 - 視聴ページが別ドメインのサイトには効かない。これは既知の限界として受け入れる
 
 #### 保存名は URL だけから組み立てる（`m3u8FileName`）
@@ -425,13 +425,101 @@ Property-Based Testing 拡張（opt-in / Full 強制）に基づき、`maxActive
 
 `AddToQueue(url, outputDir)` は URL をキューへ登録するが、**既存アイテムと同一 URL の重複登録を防ぐ**。
 
-- `isValidURL` を通過したのち、`a.mu` ロック下で `containsURL(a.items, url)` を評価する。`items` のいずれかが同一 URL を持てば**登録せず空文字 `""` を返す**（呼び出し側はそのまま無視＝静かにスキップ。不正 URL 時と同じ戻り）。
+- `a.mu` ロック下で `addRejection(a.items, url)` を評価する。不正 URL または重複なら**登録せず、拒否理由と表示文言を `AddResult` で返す**（呼び出し側は必ずユーザーへ提示する。下記「拒否した理由を返す（沈黙させない）」を参照）。
 - 比較は完全一致。単一動画は `entries[0].url`、プレイリストは各 `entry.url`（いずれも yt-dlp が返す正規 URL）が `DownloadItem.URL` に入るため、生入力の表記揺れに依らず正規 URL 同士で判定できる。
 - 重複判定の対象は `items` に現存する全アイテム（queued / downloading / paused / error）。完了（finished）・キャンセル（cancelled）は `items` から除去済みのため自然に対象外。
 - **重複チェックと append は同一ロック区間で行う**こと。Wails の各 IPC 呼び出しは別 goroutine で走るため、同一 URL の同時登録が二重に通るのを防ぐ。
 - 判定は純粋関数 `containsURL([]*DownloadItem, string) bool` に切り出してテストする。
 
 エラー状態の同一 URL を再実行したい場合は「リトライ」ボタンを使う（重複登録ではなく既存アイテムの再キュー）。
+
+#### 拒否した理由を返す（沈黙させない）
+
+**やってはいけないこと:** 登録を拒否したときに空文字だけを返し、呼び出し側がそれを無視する。
+
+**なぜか（2026-09-23 に実際に起きた）:** ユーザーが URL を登録したところ、ダウンロードが
+開始されないままリストから消えた。フロントエンドは「取得中…」プレースホルダーを
+`finally` で必ず消すため、**拒否された場合は何も残らず、エラーも出ない**。
+`AddToQueue` は理由を返さず、登録経路はログも書いていなかったため、
+**ユーザーも開発者も原因を特定できなかった。**
+
+「重複は静かにスキップ」という判断自体は妥当だが、それが**不具合と見分けられない**のが問題。
+
+**正しい代替手段:** 拒否理由を構造化して返し、判定を純粋関数に切り出す。
+
+```go
+type AddResult struct {
+    ID      string `json:"id"`      // 受理時のみ
+    Reason  string `json:"reason"`  // "" = 受理 / "invalid" / "duplicate"
+    Message string `json:"message"` // 拒否理由の表示文言（受理時は ""）
+}
+
+// addRejection は拒否すべきかとその理由を返す。"" なら受理。
+func addRejection(items []*DownloadItem, url string) string
+func addRejectionMessage(reason string) string
+```
+
+- **判定と append は従来どおり同一ロック区間**で行う（同一 URL の同時登録を防ぐため）。
+  `addRejection` を純粋関数にしてロック外でテストできるようにする
+- フロントエンドは `reason` が非空なら `message` を表示する。登録処理は止めない
+- 拒否は必ずログにも記録する（下記「ログのセッション管理」）
+
+### ログのセッション管理
+
+**やってはいけないこと:** アプリ起動時に `truncateLog` でログを空にする。
+
+**なぜか:** 問題を再現した後にアプリを再起動すると**証拠が消える**。実際に上記の事象で、
+再現後に確認した時点でログは 0 バイトだった。「再現してから再起動しないでください」と
+ユーザーに要求するのは調査手順として現実的でない。
+
+**正しい代替手段:** 起動時は追記を続け、**上限を超えたときだけ 1 世代退避する**。
+
+```go
+const maxLogBytes = 5 << 20 // 5 MiB
+
+func shouldRotateLog(size int64) bool { return size >= maxLogBytes }
+```
+
+- 上限超過時は `moviedl.log` を `moviedl.log.1` へ `os.Rename`（前回世代は上書きされる）。
+  ログを消す経路はここだけにする
+- 起動ごとにセッション開始行（バージョン付き）を書き、どこから新しい実行かを判別できるようにする
+- 追記は `appendLog` に集約する。`runDownload` の高頻度な進捗行は従来どおり
+  開いたままのハンドル（`logf`）を使い、低頻度のイベント（登録・拒否・取得）は `appendLog` を使う
+- `appendLog` も `logLine` 経由にする（トークンのマスクを通すため）
+
+### Referer のユーザー指定（元ページ URL）
+
+自動導出（`refererFor`）は m3u8 自身のオリジンを返すため、**プレイヤーや CDN が視聴ページと
+別ドメインにある構成では効かない**。エラーになったアイテムに対して、ユーザーが元ページの
+URL を指定して再試行できるようにする。
+
+```go
+// effectiveReferer はユーザー指定を優先し、なければ m3u8 の自動導出に落ちる。
+func effectiveReferer(url, override string) string
+
+func (a *App) RetryWithReferer(id, pageURL string) string // "" = 成功、非空 = エラー文言
+```
+
+- `DownloadItem.Referer` に保持する。**`resetForRequeue` / リトライで消してはいけない**
+  （再試行のために指定した値が消えたら意味がない）
+- 指定値も `isValidURL` を通す。**通らなければ受け付けずエラー文言を返す**
+  （`-` 始まりの値が `--referer` の引数に化けるのを防ぐ。「引数インジェクション対策」と同じ）
+- ユーザー指定は **m3u8 以外の URL にも適用する**。自動付与を m3u8 に限定したのは既存経路の
+  挙動を変えないためで、ユーザーが明示したものはその限定の対象外
+- `buildYtDlpArgs` は Referer の上書き値を引数で受け取る（純粋関数のまま保つ）
+- `RetryDownload` と `RetryWithReferer` は `resetForRetry` を共有する（初期化漏れを 1 箇所に集める）
+
+### テスト可能プロパティ（PBT-01）— 診断性と Referer 指定
+
+| 対象 | カテゴリ | プロパティ |
+|---|---|---|
+| `addRejection` | Oracle（判定の一致） | 受理するのは「`isValidURL` が真かつ `containsURL` が偽」のときだけ。不正判定が重複判定より先 |
+| `addRejectionMessage` | Invariant（沈黙の禁止） | **`reason` が非空なら文言も必ず非空**。未知の理由でも空にしない（この関数の存在理由そのもの） |
+| `addRejectionMessage` | Invariant（対応関係） | `reason` が空のときだけ文言が空 |
+| `shouldRotateLog` | Invariant（範囲制約・単調） | 真になるのは `size >= maxLogBytes` のときだけで、真なら `size+1` でも真 |
+| `effectiveReferer` | Invariant（引数インジェクション） | **任意の URL と任意の指定値に対し `-` で始まらない** |
+| `effectiveReferer` | Invariant（優先順位） | 妥当な指定値は必ず採用され、自動導出に勝つ |
+| `effectiveReferer` | Invariant（フォールバック） | 指定が空・不正なら `refererFor(url)` と一致する |
 
 ### 手動開始（StartDownload）
 

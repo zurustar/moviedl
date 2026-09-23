@@ -54,6 +54,10 @@ export function InstallYtDlp() {
   return window['go']['main']['App']['InstallYtDlp']();
 }
 
+export function IsM3U8URL(arg1) {
+  return window['go']['main']['App']['IsM3U8URL'](arg1);
+}
+
 export function PauseDownload(arg1) {
   return window['go']['main']['App']['PauseDownload'](arg1);
 }
@@ -64,6 +68,10 @@ export function ResumeDownload(arg1) {
 
 export function RetryDownload(arg1) {
   return window['go']['main']['App']['RetryDownload'](arg1);
+}
+
+export function RetryWithReferer(arg1, arg2) {
+  return window['go']['main']['App']['RetryWithReferer'](arg1, arg2);
 }
 
 export function SelectDirectory() {

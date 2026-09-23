@@ -3,11 +3,12 @@
 ## Project Information
 - **Project Type**: Brownfield
 - **Start Date**: 2026-08-06T00:00:00Z
-- **Current Stage**: CONSTRUCTION - Build and Test 完了（要件 3「m3u8（HLS）対応」・**実機の手動確認待ち**。自動検証は `make check` 緑・67 テスト通過）
+- **Current Stage**: CONSTRUCTION - Build and Test 完了（要件 4「登録の診断性」+ 要件 5「Referer のユーザー指定」・**実機の手動確認待ち**。自動検証は `make check` 緑・81 テスト通過）
+- **リリース済み**: 要件 3「m3u8（HLS）対応」→ v0.2.3（commit 7f89c82）
 - **完了済み要件**: 要件 1「同時ダウンロード数 0（登録のみモード）」→ v0.2.1 としてリリース済み（commit 35c8767）／要件 2「yt-dlp の手動更新」→ commit 588e13f
 - **要件 2 の成果物**: [code-generation-plan-ytdlp-update.md](construction/plans/code-generation-plan-ytdlp-update.md)（TDD 6 サイクル・手動確認チェックリスト付き）
-- **要件 3 の現況**: 実現可能性評価を完了 → [m3u8-feasibility.md](inception/requirements/m3u8-feasibility.md)。判定は「実行可能」だが 3 層に分かれる。スコープは**インターネット上の m3u8 URL に確定**（ローカル .m3u8 は対象外・ユーザー回答 2026-09-21）。[requirement-verification-questions.md](inception/requirements/requirement-verification-questions.md) の Q1〜Q6 への回答待ち（Step 6 GATE）。要件 1 の Q&A は [requirement-verification-questions-archive.md](inception/requirements/requirement-verification-questions-archive.md) へ退避
-- **⚠️ 要件 3 の評価中に発見した既存バグ（m3u8 非依存）**: yt-dlp が起動する **ffmpeg 孫プロセスがどの停止経路でも停止されない**。`applyOSProcAttr` が非 Windows で no-op でプロセスグループを作らないため、yt-dlp への SIGKILL で ffmpeg が孤児化して取得を続ける（実測確認）。影響: `CancelDownload` / `PauseDownload` / `UpdateYtDlp` の `waitProcsDrained`。独立要件として立てる候補（Q1 の選択肢 B/C）
+- **要件 3 の記録**: 実現可能性評価 → [m3u8-feasibility.md](inception/requirements/m3u8-feasibility.md)。スコープは**インターネット上の m3u8 URL**（ローカル .m3u8 は対象外・ユーザー回答 2026-09-21）。Q1〜Q6 は回答済み・実装済み・v0.2.3 としてリリース済み。要件 1 の Q&A は [requirement-verification-questions-archive.md](inception/requirements/requirement-verification-questions-archive.md) へ退避
+- **要件 3 の評価中に発見した既存バグ（m3u8 非依存・修正済み）**: yt-dlp が起動する **ffmpeg 孫プロセスがどの停止経路でも停止されなかった**。`applyOSProcAttr` が非 Windows で no-op でプロセスグループを作らず、yt-dlp への SIGKILL で ffmpeg が孤児化して取得を続けていた（実測確認）。Q1 = B により要件 3 に含めて修正し v0.2.3 に入っている。**ただし Windows 実機での動作確認は未実施**
 
 ## Workspace State
 - **Existing Code**: Yes
@@ -23,7 +24,7 @@
 - **Structure patterns**: See code-generation.md Critical Rules
 
 ## Extension Configuration
-**要件 3（m3u8 対応・現行）:**
+**要件 3 以降（現行。要件 4・5 も同じ設定を継続）:**
 
 | Extension | Enabled | Enforcement Mode | Decided At |
 |---|---|---|---|
@@ -43,7 +44,7 @@ Security Baseline を要件 2 の「No」から変更した理由: 今回は (a)
 
 Go 用 PBT フレームワークは **`pgregory.net/rapid` v1.3.0 に確定**（PBT-09。`go.mod` に追加済み、`design.md`「テスト可能プロパティ（PBT-01）」に記録）。
 
-## Stage Progress — 要件 3（m3u8（HLS）対応）★現行
+## Stage Progress — 要件 3（m3u8（HLS）対応）— v0.2.3 としてリリース済み
 
 ### 🔵 INCEPTION PHASE
 - [x] Workspace Detection — 既存 aidlc-state.md を検出しレジューム（Brownfield）
@@ -119,3 +120,43 @@ Go 用 PBT フレームワークは **`pgregory.net/rapid` v1.3.0 に確定**（
 | PBT-10 例示ベースとの併存 | Compliant | `pbt_test.go` を分離。0 の保持・既定 0・0 で自動補充しない・0 で実行中を止めないの各シナリオに例示ベーステストが存在 |
 
 **Blocking PBT findings: なし**
+
+---
+
+## 要件 4・5（v0.2.3 後の追加対応）
+
+**経緯:** v0.2.3 リリース後、ユーザーが URL を登録したところダウンロードが開始されないまま
+リストから消えた。切り分けの結果、渡されたのは動画ページの URL で**パスが `.m3u8` で
+終わっていなかった**ため m3u8 の処理が一切発動していなかった。さらに実測で
+**yt-dlp が JavaScript を実行しない**ため、m3u8 の URL が HTML に文字列として存在しない
+ページでは `Unsupported URL` になることを確認した。
+
+**この一件の本質的な問題は「失敗の理由が誰にも分からない」ことだった。**
+
+### 要件 4: 登録が拒否された理由をユーザーと調査者に伝える（B）
+- [x] `AddToQueue` が拒否理由を構造化して返す（`AddResult`）。黙って空文字を返さない
+- [x] 登録経路（`FetchPlaylist` / `AddToQueue`）の結果をログに記録する
+- [x] **起動時に前回のログを消さない**（上限 5 MiB 超過時だけ 1 世代退避）
+- [x] フロントエンドが拒否理由を非ブロッキングのバナーで表示する
+
+### 要件 5: 元ページ URL を指定して再試行（A）
+- [x] `effectiveReferer` — ユーザー指定が自動導出に勝つ。不正な指定は無視して自動導出に落ちる
+- [x] `RetryWithReferer` — エラーアイテムに元ページ URL を設定して再キュー
+- [x] `DownloadItem.Referer` はリトライ・再キューで保持される
+- [x] エラーアイテムの ⤴ ボタンと入力モーダル
+
+### 成果物
+- [code-generation-plan-diagnostics-referer.md](construction/plans/code-generation-plan-diagnostics-referer.md)（TDD 6 サイクル・実装中の判断 3 件を記録）
+- `make check` 緑 / **81 テスト通過**（PBT 32 + 例示ベース 49。前回 67 件から +14）
+- `GOOS=windows go build` / `go vet` 通過
+
+### ⚠️ 未完了
+- [ ] 実機の手動確認（チェックリストは上記プランに記載）
+- [ ] コミット・リリース（ユーザーの指示があるまで行わない）
+- [ ] **要件 3 の Windows 実機確認は依然として未実施**（Job Object の動作）
+
+### 対象外と判定した事項
+**ページ URL から JavaScript 実行後の m3u8 を発見すること。** yt-dlp は JS を実行せず、
+解決にはヘッドレスブラウザが必要。本アプリは WebView を内蔵しているが、design.md の
+「WebView にリモートコンテンツを読み込まない」規約（`AddToQueue` 等のファイル書き込み API が
+バインドされているため）に正面から反する。実装するなら隔離した別プロセスが必要。

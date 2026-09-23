@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -52,6 +53,10 @@ type DownloadItem struct {
 	Elapsed   string  `json:"elapsed"`
 	Status    string  `json:"status"` // "queued"|"downloading"|"paused"|"finished"|"error"|"cancelled"
 	Error     string  `json:"error,omitempty"`
+	// Referer はユーザーが指定した元ページ URL（未指定なら空）。
+	// 自動導出（m3u8 のオリジン）が効かない構成のための逃げ道。
+	// **リトライ・再キューで消してはいけない**（消えたら再試行の意味がなくなる）。
+	Referer string `json:"referer,omitempty"`
 
 	outputDir  string
 	cmd        *exec.Cmd
@@ -163,7 +168,7 @@ func (a *App) GetMaxConcurrent() int {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-	truncateLog()
+	startLogSession()
 	cleanupLeftoverWorkDirs()
 	go a.scheduler()
 }
@@ -231,6 +236,12 @@ func selectToStart(items []*DownloadItem, maxActive int) []*DownloadItem {
 func (a *App) emit(item *DownloadItem) {
 	if !item.startedAt.IsZero() && item.Status == "downloading" {
 		item.Elapsed = formatElapsed(time.Since(item.startedAt))
+	}
+	// ctx は startup で設定される。未設定なのは startup 前（= 単体テスト）だけで、
+	// その状態では通知先のフロントエンドが存在しない。Wails の EventsEmit は
+	// nil ctx でエラーを吐くため、ここで止めて App のメソッドを単体テストできるようにする。
+	if a.ctx == nil {
+		return
 	}
 	wailsruntime.EventsEmit(a.ctx, "download:update", *item)
 }
@@ -896,11 +907,33 @@ func (a *App) FetchPlaylist(rawURL string) ([]PlaylistEntry, error) {
 	}
 	defer a.unregisterProc(cmd)
 
+	// 登録経路はログを一切書いていなかったため、URL が消えたときに原因を追えなかった。
+	// 対象 URL・件数・失敗理由を残す。design.md「ログのセッション管理」を参照。
+	appendLog("[FETCH] 開始: url=%s", rawURL)
+
 	out, err := cmd.Output()
 	if err != nil {
+		// cmd.Output() は Stderr 未設定時に ExitError.Stderr へ標準エラーを詰める。
+		// yt-dlp の失敗理由（Unsupported URL など）はここにしか出ないので必ず残す。
+		var stderr string
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			stderr = strings.TrimSpace(string(ee.Stderr))
+		}
+		appendLog("[FETCH] 失敗: url=%s err=%v stderr=%q", rawURL, err, stderr)
 		return nil, fmt.Errorf("情報取得失敗: %w", err)
 	}
-	return parsePlaylistJSON(out)
+
+	entries, perr := parsePlaylistJSON(out)
+	if perr != nil {
+		appendLog("[FETCH] 解析失敗: url=%s err=%v out=%d bytes", rawURL, perr, len(out))
+		return nil, perr
+	}
+	appendLog("[FETCH] 成功: url=%s entries=%d", rawURL, len(entries))
+	for i, e := range entries {
+		appendLog("[FETCH]   entry[%d] url=%s title=%q", i, e.URL, e.Title)
+	}
+	return entries, nil
 }
 
 // parsePlaylistJSON は yt-dlp --dump-json の出力（1 行 1 JSON）を解析する。
@@ -1001,6 +1034,27 @@ func refererFor(raw string) string {
 		return ""
 	}
 	return origin
+}
+
+// effectiveReferer は yt-dlp へ渡す Referer を決める。
+//
+// ユーザーが明示した元ページ URL（override）があればそれを優先し、なければ
+// m3u8 の自動導出（refererFor）に落ちる。
+//
+// **なぜユーザー指定が必要か:** 自動導出は m3u8 自身のオリジンを返すため、
+// プレイヤーや CDN が視聴ページと別ドメインにある構成では効かない（よくある構成）。
+//
+// **なぜユーザー指定は m3u8 に限定しないか:** 自動付与を m3u8 に限ったのは既存の
+// 対応サイトの挙動を変えないため。ユーザーが明示したものはその限定の対象外。
+//
+// 不正な override は無視して自動導出に落ちる。`-` 始まりの値が `--referer` の
+// 引数に化けるのを防ぐ多層防御（design.md「引数インジェクション対策」と同じ思想）。
+// 入口の検証は RetryWithReferer が行い、ここは最後の砦。
+func effectiveReferer(url, override string) string {
+	if o := strings.TrimSpace(override); o != "" && isValidURL(o) {
+		return o
+	}
+	return refererFor(url)
 }
 
 // m3u8GenericPathSegments は保存名を組み立てるときに飛ばすパス要素。
@@ -1176,18 +1230,58 @@ func containsURL(items []*DownloadItem, url string) bool {
 	return false
 }
 
-// AddToQueue registers a URL as a queued item and notifies the scheduler.
-// 不正な URL（http/https 以外）、および既存アイテムと同一 URL（重複）は
-// 空文字を返して登録を拒否する。重複チェックと append は同一ロック区間で行う
-// （Wails の各 IPC は別 goroutine のため、同一 URL の同時登録を防ぐ）。
-func (a *App) AddToQueue(url, outputDir string) string {
+// AddResult は AddToQueue の結果。拒否した場合は理由と表示文言を返す。
+//
+// **空文字だけを返して黙って捨ててはいけない。** 2026-09-23 に、登録が拒否された
+// アイテムが「開始もせずリストから消えた」ように見え、画面にもログにも情報が
+// 残らずユーザーも開発者も原因を特定できない事象が起きた。
+// design.md「拒否した理由を返す（沈黙させない）」を参照。
+type AddResult struct {
+	ID      string `json:"id"`      // 受理時のみ
+	Reason  string `json:"reason"`  // "" = 受理 / "invalid" / "duplicate"
+	Message string `json:"message"` // 拒否理由の表示文言（受理時は ""）
+}
+
+// addRejection は登録を拒否すべきかとその理由を返す。"" なら受理。
+//
+// 不正 URL の判定を重複判定より先に行う。不正な値を「重複」と report すると
+// ユーザーが誤った対処（既存アイテムの削除）に誘導される。
+func addRejection(items []*DownloadItem, url string) string {
 	if !isValidURL(url) {
-		return ""
+		return "invalid"
 	}
-	a.mu.Lock()
-	if containsURL(a.items, url) {
-		a.mu.Unlock()
+	if containsURL(items, url) {
+		return "duplicate"
+	}
+	return ""
+}
+
+// addRejectionMessage は拒否理由をユーザー向けの文言にする。
+// 未知の理由でも空文字を返さない（沈黙させないことがこの関数の目的）。
+func addRejectionMessage(reason string) string {
+	switch reason {
+	case "":
 		return ""
+	case "invalid":
+		return "この URL は登録できません（http:// または https:// で始まる必要があります）。"
+	case "duplicate":
+		return "この URL は既に登録されています。エラー状態のものを再実行する場合はリトライを使ってください。"
+	default:
+		return "この URL は登録できませんでした（理由: " + reason + "）。"
+	}
+}
+
+// AddToQueue registers a URL as a queued item and notifies the scheduler.
+// 拒否した場合は理由と表示文言を返す（呼び出し側が必ずユーザーへ提示する）。
+// 判定と append は同一ロック区間で行う
+// （Wails の各 IPC は別 goroutine のため、同一 URL の同時登録を防ぐ）。
+func (a *App) AddToQueue(url, outputDir string) AddResult {
+	a.mu.Lock()
+	reason := addRejection(a.items, url)
+	if reason != "" {
+		a.mu.Unlock()
+		appendLog("[ADD] 拒否: reason=%s url=%s", reason, url)
+		return AddResult{Reason: reason, Message: addRejectionMessage(reason)}
 	}
 	id := fmt.Sprintf("%d", atomic.AddInt64(&dlCounter, 1))
 	item := &DownloadItem{
@@ -1199,9 +1293,10 @@ func (a *App) AddToQueue(url, outputDir string) string {
 	a.items = append(a.items, item)
 	a.mu.Unlock()
 
+	appendLog("[ADD] 受理: id=%s url=%s", id, url)
 	a.emit(item)
 	a.notify()
-	return id
+	return AddResult{ID: id}
 }
 
 // StartDownload manually moves a queued item to active, bypassing the scheduler's
@@ -1323,7 +1418,17 @@ func (a *App) CancelDownload(id string) {
 	}
 }
 
+// maxLogBytes はログを 1 世代退避する閾値。
+const maxLogBytes = 5 << 20 // 5 MiB
+
+// logDirOverride はログ出力先の差し替え口。通常は空で、テストだけが設定する。
+// テストが実ログへ書くと、調査したい本物の記録をノイズで汚してしまうため。
+var logDirOverride string
+
 func logPath() (string, error) {
+	if logDirOverride != "" {
+		return filepath.Join(logDirOverride, "moviedl.log"), nil
+	}
 	dir, err := ytDlpDir()
 	if err != nil {
 		return "", err
@@ -1331,12 +1436,40 @@ func logPath() (string, error) {
 	return filepath.Join(dir, "moviedl.log"), nil
 }
 
-func truncateLog() {
+// shouldRotateLog はログを退避すべきサイズかを返す。
+func shouldRotateLog(size int64) bool { return size >= maxLogBytes }
+
+// startLogSession は起動時に呼ぶ。**前回のログを消してはいけない。**
+//
+// 以前は truncateLog でログを空にしていたが、問題を再現した後にアプリを再起動すると
+// 証拠が失われる。実際に「登録した URL が消えた」事象の調査時、ログは 0 バイトだった。
+// 「再現してから再起動しないでください」と要求するのは調査手順として現実的でない。
+// design.md「ログのセッション管理」を参照。
+func startLogSession() {
 	p, err := logPath()
 	if err != nil {
 		return
 	}
-	os.WriteFile(p, nil, 0o644) //nolint:errcheck
+	// 際限なく膨らませないため、上限を超えたときだけ 1 世代退避する。
+	// ログを消す経路はここだけに限る。
+	if fi, err := os.Stat(p); err == nil && shouldRotateLog(fi.Size()) {
+		os.Rename(p, p+".1") //nolint:errcheck // 前回世代は上書きされる
+	}
+	appendLog("=== session start === version=%s", formatVersion(version, buildDate))
+}
+
+// appendLog は低頻度のイベント（登録・拒否・情報取得）を 1 行追記する。
+//
+// runDownload の高頻度な進捗行は開いたままのハンドル（logf）を使う。こちらは
+// 呼び出しごとに開閉するが、頻度が低いので問題にならない。
+// logLine 経由なのでトークンのマスクを必ず通る（SECURITY-03）。
+func appendLog(format string, v ...any) {
+	lf := openLogFile()
+	if lf == nil {
+		return
+	}
+	defer lf.Close()
+	fmt.Fprint(lf, logLine(time.Now(), format, v...))
 }
 
 func openLogFile() *os.File {
@@ -1472,7 +1605,7 @@ func (a *App) runDownload(item *DownloadItem) {
 	} else {
 		logf("[STEP2] ffmpeg not found, using single-format fallback")
 	}
-	args := buildYtDlpArgs(tmpBase, workDir, ff, item.URL)
+	args := buildYtDlpArgs(tmpBase, workDir, ff, item.URL, item.Referer)
 	logf("[STEP2] command: %s %s", ytdlp, strings.Join(args, " "))
 
 	cmd := exec.Command(ytdlp, args...)
@@ -1644,14 +1777,7 @@ func (a *App) RetryDownload(id string) {
 		}
 	}
 	if item != nil {
-		item.Status = "queued"
-		item.Error = ""
-		item.Percent = 0
-		item.Speed = ""
-		item.ETA = ""
-		item.Elapsed = ""
-		item.TotalSize = ""
-		atomic.StoreInt32(&item.cancelFlag, 0)
+		resetForRetry(item)
 	}
 	a.mu.Unlock()
 	if item == nil {
@@ -1659,6 +1785,60 @@ func (a *App) RetryDownload(id string) {
 	}
 	a.emit(item)
 	a.notify()
+}
+
+// resetForRetry はエラーアイテムを再実行できる状態に戻す。
+// RetryDownload と RetryWithReferer が共有する（初期化漏れを 1 箇所に集める）。
+//
+// **Referer はクリアしない。** ユーザーが再試行のために指定した値なので、
+// ここで消すと指定した意味がなくなる。
+// a.mu の保護下で呼ぶこと。
+func resetForRetry(item *DownloadItem) {
+	item.Status = "queued"
+	item.Error = ""
+	item.Percent = 0
+	item.Speed = ""
+	item.ETA = ""
+	item.Elapsed = ""
+	item.TotalSize = ""
+	atomic.StoreInt32(&item.cancelFlag, 0)
+}
+
+// RetryWithReferer は元ページ URL を Referer として設定し、エラーアイテムを再キューする。
+// 戻り値は "" が成功、非空はユーザーへ提示するエラー文言。
+//
+// なぜ必要か: 自動導出（refererFor）は m3u8 自身のオリジンを返すため、プレイヤーや CDN が
+// 視聴ページと別ドメインにある構成では効かない。その逃げ道として用意する。
+// design.md「Referer のユーザー指定（元ページ URL）」を参照。
+func (a *App) RetryWithReferer(id, pageURL string) string {
+	// 入口で検証する。"-" 始まりの値が --referer の引数に化けるのを防ぐ
+	// （design.md「引数インジェクション対策」と同じ多層防御。effectiveReferer が最後の砦）。
+	page := strings.TrimSpace(pageURL)
+	if !isValidURL(page) {
+		return "元ページの URL が不正です（http:// または https:// で始まる必要があります）。"
+	}
+
+	a.mu.Lock()
+	var item *DownloadItem
+	for _, it := range a.items {
+		if it.ID == id && it.Status == "error" {
+			item = it
+			break
+		}
+	}
+	if item != nil {
+		item.Referer = page
+		resetForRetry(item)
+	}
+	a.mu.Unlock()
+
+	if item == nil {
+		return "再試行できる対象が見つかりません（エラー状態のアイテムのみ指定できます）。"
+	}
+	appendLog("[RETRY] 元ページ URL を指定して再試行: id=%s referer=%s url=%s", id, page, item.URL)
+	a.emit(item)
+	a.notify()
+	return ""
 }
 
 func workDirRegistryPath() (string, error) {
@@ -1811,7 +1991,9 @@ func uniqueDest(dir, name string) string {
 // なりうる。--abort-on-unavailable-fragment で握りつぶさず中断（エラー）させ、
 // --retries / --fragment-retries / --socket-timeout で一時障害を吸収する。
 // aidlc-docs/inception/application-design/design.md「ダウンロードの堅牢化」を参照。
-func buildYtDlpArgs(tmpBase, workDir, ffmpegLoc, url string) []string {
+// refererOverride にはユーザーが指定した元ページ URL を渡す（未指定なら空文字）。
+// 未指定・不正なら m3u8 の自動導出に落ちる（effectiveReferer を参照）。
+func buildYtDlpArgs(tmpBase, workDir, ffmpegLoc, url, refererOverride string) []string {
 	args := []string{
 		"--newline", "--progress", "--no-mtime",
 		"--encoding", "utf-8",
@@ -1832,10 +2014,12 @@ func buildYtDlpArgs(tmpBase, workDir, ffmpegLoc, url string) []string {
 	} else {
 		args = append(args, "-f", "best[ext=mp4]/best")
 	}
-	// m3u8 URL のときだけ Referer を渡す（m3u8 を配信するサーバは Referer を要求することがあり、
-	// 素の URL では 403 になる）。m3u8 以外に付けると既存の対応サイトの挙動を変えるため付けない。
-	// design.md「Referer は m3u8 URL に限って付与する」を参照。
-	if ref := refererFor(url); ref != "" {
+	// Referer を渡す（m3u8 を配信するサーバは Referer を要求することがあり、素の URL では
+	// 403 になる）。ユーザー指定の元ページ URL があればそれを優先し、なければ m3u8 の
+	// オリジンを自動導出する。自動導出を m3u8 に限定しているのは、既存の対応サイトの
+	// 挙動を変えないため（デグレ防止）。
+	// design.md「Referer は m3u8 URL に限って付与する」「Referer のユーザー指定」を参照。
+	if ref := effectiveReferer(url, refererOverride); ref != "" {
 		args = append(args, "--referer", ref)
 	}
 	args = append(args, "--", url)

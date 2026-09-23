@@ -489,6 +489,382 @@ func TestExplainDownloadError(t *testing.T) {
 	})
 }
 
+// 仕様: aidlc-docs/inception/application-design/design.md「拒否した理由を返す（沈黙させない）」
+// 登録を拒否したら理由を返す。黙って消えてはならない。
+func TestAddRejection(t *testing.T) {
+	items := []*DownloadItem{
+		{ID: "1", URL: "https://e.com/a", Status: "queued"},
+		{ID: "2", URL: "https://e.com/b", Status: "error"},
+	}
+
+	cases := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{"受理される新規 URL", "https://e.com/c", ""},
+		{"重複（待機中）", "https://e.com/a", "duplicate"},
+		{"重複（エラー状態も対象）", "https://e.com/b", "duplicate"},
+		{"不正な URL（スキーム違反）", "file:///etc/passwd", "invalid"},
+		{"不正な URL（引数インジェクション）", "--exec=touch /tmp/x", "invalid"},
+		{"空文字", "", "invalid"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := addRejection(items, c.url); got != c.want {
+				t.Errorf("addRejection(%q) = %q, want %q", c.url, got, c.want)
+			}
+		})
+	}
+
+	// 不正 URL の判定が重複判定より先であること（不正な値を重複扱いにしない）。
+	t.Run("不正判定が重複判定より先", func(t *testing.T) {
+		withBad := []*DownloadItem{{ID: "9", URL: "file:///x", Status: "queued"}}
+		if got := addRejection(withBad, "file:///x"); got != "invalid" {
+			t.Errorf("addRejection = %q, want \"invalid\"", got)
+		}
+	})
+}
+
+func TestAddRejectionMessage(t *testing.T) {
+	// 受理時は文言を出さない。
+	if got := addRejectionMessage(""); got != "" {
+		t.Errorf("受理時の文言 = %q, want \"\"", got)
+	}
+	// 拒否理由には、ユーザーが次に何をすればよいか分かる情報を含める。
+	for _, c := range []struct {
+		reason string
+		want   []string
+	}{
+		{"invalid", []string{"http"}},
+		{"duplicate", []string{"登録"}},
+	} {
+		got := addRejectionMessage(c.reason)
+		if got == "" {
+			t.Errorf("reason=%q の文言が空（黙って消えてしまう）", c.reason)
+			continue
+		}
+		for _, w := range c.want {
+			if !strings.Contains(got, w) {
+				t.Errorf("reason=%q の文言 %q に %q が含まれない", c.reason, got, w)
+			}
+		}
+	}
+	// 未知の理由でも空にしない（沈黙させない）。
+	if got := addRejectionMessage("something-new"); got == "" {
+		t.Error("未知の理由で文言が空になった（沈黙させてはいけない）")
+	}
+}
+
+// AddToQueue は拒否理由を構造化して返す。
+func TestAddToQueueReportsRejection(t *testing.T) {
+	t.Run("受理すると ID を返し理由は空", func(t *testing.T) {
+		a := NewApp()
+		got := a.AddToQueue("https://e.com/v", "/tmp")
+		if got.Reason != "" || got.Message != "" {
+			t.Errorf("受理なのに拒否扱い: %+v", got)
+		}
+		if got.ID == "" {
+			t.Error("受理なのに ID が空")
+		}
+		if len(a.items) != 1 {
+			t.Errorf("items 件数 = %d, want 1", len(a.items))
+		}
+	})
+
+	t.Run("重複は理由と文言を返し、リストは増えない", func(t *testing.T) {
+		a := NewApp()
+		a.AddToQueue("https://e.com/v", "/tmp")
+		got := a.AddToQueue("https://e.com/v", "/tmp")
+		if got.Reason != "duplicate" {
+			t.Errorf("Reason = %q, want \"duplicate\"", got.Reason)
+		}
+		if got.Message == "" {
+			t.Error("Message が空（ユーザーに理由が伝わらない）")
+		}
+		if got.ID != "" {
+			t.Errorf("拒否なのに ID が返った: %q", got.ID)
+		}
+		if len(a.items) != 1 {
+			t.Errorf("重複でリストが増えた: %d 件", len(a.items))
+		}
+	})
+
+	t.Run("不正な URL は理由と文言を返し、登録しない", func(t *testing.T) {
+		a := NewApp()
+		got := a.AddToQueue("--exec=touch /tmp/x", "/tmp")
+		if got.Reason != "invalid" {
+			t.Errorf("Reason = %q, want \"invalid\"", got.Reason)
+		}
+		if got.Message == "" {
+			t.Error("Message が空")
+		}
+		if len(a.items) != 0 {
+			t.Errorf("不正 URL を登録してしまった: %d 件", len(a.items))
+		}
+	})
+}
+
+// useTempLog はログ出力先を一時ディレクトリへ向ける。
+// テストが実ログ（~/Library/Application Support/moviedl/moviedl.log）へ
+// 書き込むと、調査したい本物の記録をテストのノイズで汚してしまうため。
+func useTempLog(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	prev := logDirOverride
+	logDirOverride = dir
+	t.Cleanup(func() { logDirOverride = prev })
+	return filepath.Join(dir, "moviedl.log")
+}
+
+// 仕様: aidlc-docs/inception/application-design/design.md「ログのセッション管理」
+// 起動時にログを消してはならない（再現後に再起動すると証拠が失われる）。
+func TestShouldRotateLog(t *testing.T) {
+	cases := []struct {
+		size int64
+		want bool
+	}{
+		{0, false},
+		{1, false},
+		{maxLogBytes - 1, false},
+		{maxLogBytes, true},
+		{maxLogBytes + 1, true},
+		{100 << 20, true},
+	}
+	for _, c := range cases {
+		if got := shouldRotateLog(c.size); got != c.want {
+			t.Errorf("shouldRotateLog(%d) = %v, want %v", c.size, got, c.want)
+		}
+	}
+}
+
+func TestStartLogSessionKeepsPreviousRun(t *testing.T) {
+	p := useTempLog(t)
+
+	t.Run("前回の内容を消さずに追記する", func(t *testing.T) {
+		if err := os.WriteFile(p, []byte("[00:00:00.000] 前回のセッションの記録\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		startLogSession()
+
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("ReadFile: %v", err)
+		}
+		s := string(b)
+		if !strings.Contains(s, "前回のセッションの記録") {
+			t.Error("起動で前回のログが消えた（再現後に再起動すると証拠が失われる）")
+		}
+		if !strings.Contains(s, "session start") {
+			t.Errorf("セッション開始行がない: %q", s)
+		}
+	})
+
+	t.Run("上限を超えたら 1 世代退避してから始める", func(t *testing.T) {
+		big := make([]byte, maxLogBytes+10)
+		for i := range big {
+			big[i] = 'x'
+		}
+		if err := os.WriteFile(p, big, 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		startLogSession()
+
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("Stat: %v", err)
+		}
+		if fi.Size() >= maxLogBytes {
+			t.Errorf("上限超過後もログが切り替わっていない: %d バイト", fi.Size())
+		}
+		if _, err := os.Stat(p + ".1"); err != nil {
+			t.Errorf("退避世代 %s が作られていない: %v", p+".1", err)
+		}
+	})
+}
+
+func TestAppendLog(t *testing.T) {
+	p := useTempLog(t)
+
+	appendLog("[TEST] 1 行目 %d", 1)
+	appendLog("[TEST] 2 行目 url=%s", "https://e.com/a.m3u8?token=SUPERSECRET")
+
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	s := string(b)
+	if !strings.Contains(s, "1 行目 1") || !strings.Contains(s, "2 行目") {
+		t.Errorf("追記されていない: %q", s)
+	}
+	// appendLog も logLine 経由でマスクされること（SECURITY-03）。
+	if strings.Contains(s, "SUPERSECRET") {
+		t.Errorf("appendLog がトークンをマスクしていない: %q", s)
+	}
+	if !strings.Contains(s, redactedQuery) {
+		t.Errorf("マスク結果が見当たらない: %q", s)
+	}
+}
+
+// 仕様: aidlc-docs/inception/application-design/design.md「Referer のユーザー指定（元ページ URL）」
+// 自動導出は m3u8 自身のオリジンなので、プレイヤーが別ドメインにある構成では効かない。
+// ユーザーが指定した元ページ URL を優先する。
+func TestEffectiveReferer(t *testing.T) {
+	const m3u8 = "https://cdn.example.net/hls/x/master.m3u8?t=1"
+	const normal = "https://e.com/watch?v=abc"
+	const page = "https://www.example.com/video/123/"
+
+	cases := []struct {
+		name     string
+		url      string
+		override string
+		want     string
+	}{
+		{
+			name: "指定なし + m3u8 → 自動導出（m3u8 のオリジン）",
+			url:  m3u8, override: "", want: "https://cdn.example.net/",
+		},
+		{
+			name: "指定あり → 指定を優先する（自動導出に勝つ）",
+			url:  m3u8, override: page, want: page,
+		},
+		{
+			// 自動付与を m3u8 に限定したのは既存経路を変えないため。
+			// ユーザーが明示したものはその限定の対象外。
+			name: "指定あり + m3u8 でない URL → 指定を使う",
+			url:  normal, override: page, want: page,
+		},
+		{
+			name: "指定なし + m3u8 でない URL → 何も渡さない",
+			url:  normal, override: "", want: "",
+		},
+		{
+			name: "空白だけの指定は指定なし扱い",
+			url:  m3u8, override: "   ", want: "https://cdn.example.net/",
+		},
+		{
+			// 不正な指定は無視して自動導出に落ちる（多層防御）。
+			name: "不正な指定は無視する（m3u8 → 自動導出）",
+			url:  m3u8, override: "--referer=http://evil/", want: "https://cdn.example.net/",
+		},
+		{
+			name: "不正な指定は無視する（m3u8 でない → 空）",
+			url:  normal, override: "not-a-url", want: "",
+		},
+		{
+			name: "file スキームの指定は無視する",
+			url:  normal, override: "file:///etc/passwd", want: "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := effectiveReferer(c.url, c.override); got != c.want {
+				t.Errorf("effectiveReferer(%q, %q) = %q, want %q", c.url, c.override, got, c.want)
+			}
+		})
+	}
+
+	// 引数インジェクション対策: 任意の指定値に対して "-" 始まりを返さない。
+	t.Run("'-' 始まりを返さない", func(t *testing.T) {
+		for _, ov := range []string{
+			"-J", "--exec=touch /tmp/x", "--referer=http://evil/", "-o-", "", "   ",
+			"https://ok.example.com/", "file:///x",
+		} {
+			for _, u := range []string{m3u8, normal, "", "-J"} {
+				if got := effectiveReferer(u, ov); strings.HasPrefix(got, "-") {
+					t.Errorf("effectiveReferer(%q, %q) = %q: '-' 始まりは yt-dlp のオプションに化ける", u, ov, got)
+				}
+			}
+		}
+	})
+}
+
+// 仕様: aidlc-docs/inception/application-design/design.md「Referer のユーザー指定（元ページ URL）」
+func TestRetryWithReferer(t *testing.T) {
+	useTempLog(t)
+	const page = "https://www.example.com/video/123/"
+
+	newErrApp := func() (*App, *DownloadItem) {
+		a := NewApp()
+		item := &DownloadItem{
+			ID: "1", URL: "https://cdn.other.net/hls/x/master.m3u8",
+			Status: "error", Error: "アクセスが拒否されました（403）。",
+			Percent: 42, Speed: "1.5MiB/s",
+		}
+		a.items = append(a.items, item)
+		return a, item
+	}
+
+	t.Run("元ページ URL を設定して待ちキューへ戻す", func(t *testing.T) {
+		a, item := newErrApp()
+		if msg := a.RetryWithReferer("1", page); msg != "" {
+			t.Fatalf("エラー文言が返った: %q", msg)
+		}
+		if item.Referer != page {
+			t.Errorf("Referer = %q, want %q", item.Referer, page)
+		}
+		if item.Status != "queued" {
+			t.Errorf("Status = %q, want \"queued\"", item.Status)
+		}
+		if item.Error != "" || item.Percent != 0 || item.Speed != "" {
+			t.Errorf("再試行の前提がクリアされていない: %+v", item)
+		}
+	})
+
+	t.Run("設定した Referer は実際に yt-dlp の引数へ渡る", func(t *testing.T) {
+		a, item := newErrApp()
+		a.RetryWithReferer("1", page)
+		s := strings.Join(buildYtDlpArgs("abc", "/work", "", item.URL, item.Referer), " ")
+		if !strings.Contains(s, "--referer "+page) {
+			t.Errorf("引数に渡っていない: %q", s)
+		}
+	})
+
+	t.Run("不正な元ページ URL は受け付けずアイテムを変えない", func(t *testing.T) {
+		for _, bad := range []string{"--referer=http://evil/", "-J", "not-a-url", "file:///etc/passwd", "", "   "} {
+			a, item := newErrApp()
+			msg := a.RetryWithReferer("1", bad)
+			if msg == "" {
+				t.Errorf("pageURL=%q を受理してしまった", bad)
+			}
+			if item.Referer != "" {
+				t.Errorf("pageURL=%q で Referer が設定された: %q", bad, item.Referer)
+			}
+			if item.Status != "error" {
+				t.Errorf("pageURL=%q でアイテムの状態が変わった: %q", bad, item.Status)
+			}
+		}
+	})
+
+	t.Run("存在しない ID・エラー以外の状態は受け付けない", func(t *testing.T) {
+		a, item := newErrApp()
+		if msg := a.RetryWithReferer("nope", page); msg == "" {
+			t.Error("存在しない ID を受理してしまった")
+		}
+		item.Status = "downloading"
+		if msg := a.RetryWithReferer("1", page); msg == "" {
+			t.Error("downloading 状態を受理してしまった")
+		}
+	})
+
+	// Referer は以降のリトライ・再キューで消えてはいけない（消えたら再試行の意味がない）。
+	t.Run("Referer はリトライと再キューで保持される", func(t *testing.T) {
+		a, item := newErrApp()
+		a.RetryWithReferer("1", page)
+
+		item.Status = "error"
+		a.RetryDownload("1")
+		if item.Referer != page {
+			t.Errorf("RetryDownload で Referer が消えた: %q", item.Referer)
+		}
+
+		resetForRequeue(item)
+		if item.Referer != page {
+			t.Errorf("resetForRequeue で Referer が消えた: %q", item.Referer)
+		}
+	})
+}
+
 // 仕様: aidlc-docs/inception/application-design/design.md「sanitizeFilename について」
 // 禁止文字（\ / : * ? " < > |）を _ に置換し、前後の空白と末尾のドットを除去する。
 func TestSanitizeFilename(t *testing.T) {
@@ -700,7 +1076,7 @@ func TestBuildYtDlpArgs(t *testing.T) {
 
 	t.Run("堅牢化オプションは ffmpeg 有無に関わらず常に付く", func(t *testing.T) {
 		for _, ff := range []string{"", "/usr/bin/ffmpeg"} {
-			got := join(buildYtDlpArgs("abc", "/work", ff, "https://e.com/v"))
+			got := join(buildYtDlpArgs("abc", "/work", ff, "https://e.com/v", ""))
 			for _, want := range []string{
 				"--abort-on-unavailable-fragment",
 				"--fragment-retries 10",
@@ -715,7 +1091,7 @@ func TestBuildYtDlpArgs(t *testing.T) {
 	})
 
 	t.Run("ffmpeg あり → 映像+音声の最高画質を mp4 結合", func(t *testing.T) {
-		s := join(buildYtDlpArgs("abc", "/work", "/usr/bin/ffmpeg", "https://e.com/v"))
+		s := join(buildYtDlpArgs("abc", "/work", "/usr/bin/ffmpeg", "https://e.com/v", ""))
 		for _, want := range []string{
 			"--ffmpeg-location /usr/bin/ffmpeg",
 			"-f bestvideo+bestaudio/best",
@@ -728,7 +1104,7 @@ func TestBuildYtDlpArgs(t *testing.T) {
 	})
 
 	t.Run("ffmpeg なし → 単一フォーマットにフォールバックし結合しない", func(t *testing.T) {
-		s := join(buildYtDlpArgs("abc", "/work", "", "https://e.com/v"))
+		s := join(buildYtDlpArgs("abc", "/work", "", "https://e.com/v", ""))
 		if !strings.Contains(s, "-f best[ext=mp4]/best") {
 			t.Errorf("フォールバック書式がない: %q", s)
 		}
@@ -738,7 +1114,7 @@ func TestBuildYtDlpArgs(t *testing.T) {
 	})
 
 	t.Run("URL は -- 区切りの直後で末尾", func(t *testing.T) {
-		got := buildYtDlpArgs("abc", "/work", "", "https://e.com/v")
+		got := buildYtDlpArgs("abc", "/work", "", "https://e.com/v", "")
 		if got[len(got)-1] != "https://e.com/v" {
 			t.Errorf("URL が末尾でない: %v", got)
 		}
@@ -750,7 +1126,7 @@ func TestBuildYtDlpArgs(t *testing.T) {
 	// 仕様: design.md「Referer は m3u8 URL に限って付与する」
 	t.Run("m3u8 URL には --referer でオリジンを渡す", func(t *testing.T) {
 		for _, ff := range []string{"", "/usr/bin/ffmpeg"} {
-			s := join(buildYtDlpArgs("abc", "/work", ff, "https://vod.e.com/hls/x/master.m3u8?t=1"))
+			s := join(buildYtDlpArgs("abc", "/work", ff, "https://vod.e.com/hls/x/master.m3u8?t=1", ""))
 			if !strings.Contains(s, "--referer https://vod.e.com/") {
 				t.Errorf("ffmpegLoc=%q: --referer がない: %q", ff, s)
 			}
@@ -765,15 +1141,43 @@ func TestBuildYtDlpArgs(t *testing.T) {
 			"https://e.com/watch?v=abc",
 			"https://e.com/video.mp4",
 		} {
-			s := join(buildYtDlpArgs("abc", "/work", "/usr/bin/ffmpeg", u))
+			s := join(buildYtDlpArgs("abc", "/work", "/usr/bin/ffmpeg", u, ""))
 			if strings.Contains(s, "--referer") {
 				t.Errorf("url=%q に --referer を付けてはいけない: %q", u, s)
 			}
 		}
 	})
 
+	// 仕様: design.md「Referer のユーザー指定（元ページ URL）」
+	t.Run("ユーザー指定の元ページ URL を --referer に渡す", func(t *testing.T) {
+		const page = "https://www.example.com/video/123/"
+		s := join(buildYtDlpArgs("abc", "/work", "", "https://cdn.other.net/hls/x/master.m3u8", page))
+		if !strings.Contains(s, "--referer "+page) {
+			t.Errorf("指定した元ページ URL が渡っていない: %q", s)
+		}
+		// 自動導出（m3u8 のオリジン）は使われない
+		if strings.Contains(s, "--referer https://cdn.other.net/") {
+			t.Errorf("自動導出がユーザー指定に勝ってしまっている: %q", s)
+		}
+	})
+
+	t.Run("m3u8 でない URL でもユーザー指定は渡す", func(t *testing.T) {
+		const page = "https://www.example.com/video/123/"
+		s := join(buildYtDlpArgs("abc", "/work", "", "https://e.com/watch?v=abc", page))
+		if !strings.Contains(s, "--referer "+page) {
+			t.Errorf("指定した元ページ URL が渡っていない: %q", s)
+		}
+	})
+
+	t.Run("不正な指定は渡さない", func(t *testing.T) {
+		s := join(buildYtDlpArgs("abc", "/work", "", "https://e.com/watch?v=abc", "--referer=http://evil/"))
+		if strings.Contains(s, "--referer") {
+			t.Errorf("不正な指定を渡してしまった: %q", s)
+		}
+	})
+
 	t.Run("--referer は -- 終端より前に置く", func(t *testing.T) {
-		got := buildYtDlpArgs("abc", "/work", "", "https://e.com/master.m3u8")
+		got := buildYtDlpArgs("abc", "/work", "", "https://e.com/master.m3u8", "")
 		refIdx, sepIdx := -1, -1
 		for i, a := range got {
 			if a == "--referer" {
@@ -792,7 +1196,7 @@ func TestBuildYtDlpArgs(t *testing.T) {
 	})
 
 	t.Run("出力テンプレートと作業ディレクトリ指定", func(t *testing.T) {
-		s := join(buildYtDlpArgs("abc123", "/work", "", "https://e.com/v"))
+		s := join(buildYtDlpArgs("abc123", "/work", "", "https://e.com/v", ""))
 		if !strings.Contains(s, "-o abc123.%(ext)s") {
 			t.Errorf("出力テンプレートがない: %q", s)
 		}

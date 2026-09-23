@@ -12,6 +12,7 @@
 package main
 
 import (
+	"math"
 	"os/exec"
 	"strings"
 	"testing"
@@ -707,6 +708,137 @@ func TestPropIsKillablePIDRejectsDangerousValues(t *testing.T) {
 		// 反転して安全に使えるのは受理された場合だけ、を明示的に確認する。
 		if isKillablePID(pid) && -pid >= -1 {
 			rt.Fatalf("pid=%d を受理したが -pid=%d は危険な値（-1 以上）", pid, -pid)
+		}
+	})
+}
+
+// --- 登録拒否の報告と Referer 指定のプロパティ ---
+// 仕様: design.md「拒否した理由を返す（沈黙させない）」「Referer のユーザー指定（元ページ URL）」
+
+// genQueuedItemsWithURLs は URL を持つアイテム列を生成する（重複判定の対象になる集合）。
+func genQueuedItemsWithURLs() *rapid.Generator[[]*DownloadItem] {
+	return rapid.Custom(func(t *rapid.T) []*DownloadItem {
+		n := rapid.IntRange(0, 6).Draw(t, "n")
+		items := make([]*DownloadItem, 0, n)
+		for i := 0; i < n; i++ {
+			auth := genAuthority().Draw(t, "authority")
+			path := rapid.StringMatching(`/[a-z0-9/_-]{0,12}`).Draw(t, "path")
+			items = append(items, &DownloadItem{
+				ID:     rapid.StringMatching(`[0-9]{1,4}`).Draw(t, "id"),
+				URL:    "https://" + auth + path,
+				Status: genStatus().Draw(t, "status"),
+			})
+		}
+		return items
+	})
+}
+
+// プロパティ（判定の一致 / Oracle）: 受理するのは「妥当な URL かつ未登録」のときだけ。
+// 崩れると、登録できるはずの URL を拒否したり、不正な URL を受理したりする。
+func TestPropAddRejectionMatchesOracle(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		items := genQueuedItemsWithURLs().Draw(rt, "items")
+		url := genAdversarialURLish().Draw(rt, "url")
+
+		got := addRejection(items, url)
+
+		var want string
+		switch {
+		case !isValidURL(url):
+			want = "invalid"
+		case containsURL(items, url):
+			want = "duplicate"
+		}
+		if got != want {
+			rt.Fatalf("addRejection(%q) = %q, want %q", url, got, want)
+		}
+	})
+}
+
+// プロパティ（不変条件）: 拒否したときは必ず文言が付く。
+// 「黙って消える」ことを構造的に防ぐのがこの関数の存在理由なので、空文言は許されない。
+func TestPropAddRejectionAlwaysExplained(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		reason := rapid.OneOf(
+			rapid.SampledFrom([]string{"", "invalid", "duplicate"}),
+			rapid.StringMatching(`[a-z-]{1,12}`), // 将来追加される理由
+		).Draw(rt, "reason")
+
+		msg := addRejectionMessage(reason)
+		if reason == "" {
+			if msg != "" {
+				rt.Fatalf("受理（reason=\"\"）なのに文言が付いた: %q", msg)
+			}
+			return
+		}
+		if msg == "" {
+			rt.Fatalf("reason=%q で文言が空（黙って消えてしまう）", reason)
+		}
+	})
+}
+
+// プロパティ（範囲制約）: 退避の判定は閾値だけで決まり、単調である。
+func TestPropShouldRotateLogIsMonotone(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		size := rapid.OneOf(
+			rapid.Int64Range(0, maxLogBytes*2),
+			rapid.Int64(),
+		).Draw(rt, "size")
+
+		if got, want := shouldRotateLog(size), size >= maxLogBytes; got != want {
+			rt.Fatalf("shouldRotateLog(%d) = %v, want %v", size, got, want)
+		}
+		// 単調性: 退避する大きさより大きければ必ず退避する。
+		if shouldRotateLog(size) && size < math.MaxInt64 && !shouldRotateLog(size+1) {
+			rt.Fatalf("size=%d で退避するのに %d で退避しない（単調でない）", size, size+1)
+		}
+	})
+}
+
+// プロパティ（引数インジェクション）: 任意の URL と任意の指定値に対し "-" 始まりを返さない。
+// ここが崩れると --referer の引数が yt-dlp のオプションに化ける。
+func TestPropEffectiveRefererNeverStartsWithDash(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		url := genAdversarialURLish().Draw(rt, "url")
+		override := genAdversarialURLish().Draw(rt, "override")
+
+		if got := effectiveReferer(url, override); strings.HasPrefix(got, "-") {
+			rt.Fatalf("effectiveReferer(%q, %q) = %q: '-' 始まりは化ける", url, override, got)
+		}
+	})
+}
+
+// プロパティ（優先順位）: 妥当な指定値は必ず採用され、自動導出に勝つ。
+func TestPropEffectiveRefererPrefersValidOverride(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		url := genAdversarialURLish().Draw(rt, "url")
+		auth := genAuthority().Draw(rt, "authority")
+		path := rapid.StringMatching(`/[a-z0-9/_-]{0,12}`).Draw(rt, "path")
+		override := "https://" + auth + path
+
+		if !isValidURL(override) {
+			rt.Skip("生成した指定値が妥当でない")
+		}
+		if got := effectiveReferer(url, override); got != override {
+			rt.Fatalf("effectiveReferer(%q, %q) = %q: 妥当な指定値が採用されていない", url, override, got)
+		}
+	})
+}
+
+// プロパティ（フォールバック）: 指定がない・不正なら自動導出と一致する。
+func TestPropEffectiveRefererFallsBackToAuto(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		url := genAdversarialURLish().Draw(rt, "url")
+		override := rapid.SampledFrom([]string{
+			"", "   ", "-J", "--referer=http://evil/", "not-a-url",
+			"file:///etc/passwd", "example.com/x", "ftp://e.com/x",
+		}).Draw(rt, "override")
+
+		if isValidURL(override) {
+			rt.Skip("この指定値は妥当なので採用されるのが正しい")
+		}
+		if got, want := effectiveReferer(url, override), refererFor(url); got != want {
+			rt.Fatalf("effectiveReferer(%q, %q) = %q, want %q（自動導出へ落ちるべき）", url, override, got, want)
 		}
 	})
 }

@@ -219,3 +219,31 @@ Build and Test: make check 成功（gofmt 差分なし / go vet 警告なし / s
 
 ---
 
+## 不具合報告と切り分け（v0.2.3 後）
+**Timestamp**: 2026-09-23T00:00:00Z
+**User Input**: "期待する動作にならなかったんで、あなたにログを渡して解析してもらいたいんですけど、どうしたらいい？" / "期待した動作は当然ダウンロードできること。実際におきたのは、URLを渡したがダウンロードがはじまりもせずにダウンロードリストから消えたこと。" / "https://www.javxxx.me/ja/v2/video/mmus-101/" / "検索して偶然出てきたm3u8ファイルがあるサイトのURLを渡しました。このサイトはm3u8そのものではなく、そこにリンクされているのだと思います。m3u8ではない場合は動画ファイルを探してダウンロードしてくれるのになぜこのパターンだと追いかけてくれないのでしょうか"
+**AI Response**: "ログの実態を確認したところ 0 バイトで、truncateLog が startup で毎回消していることと、登録経路（FetchPlaylist / AddToQueue）が一切ログを書いていないことを特定。コード読解により、フロントエンドの削除判定は finished / cancelled のみで、登録成功なら emit で必ずリストに残るため、『開始もせず消えた』のは AddToQueue が拒否して空文字を返した（不正 URL または重複）ケースだと絞り込んだ。
+
+渡された URL のパスは /ja/v2/video/mmus-101/ で .m3u8 で終わらないため isM3U8URL が偽になり、v0.2.3 の m3u8 処理が一切発動していなかったことを指摘。要件確定時（Q1）に『m3u8 の URL』と『HLS 配信ページの URL』の区別を掘らなかった点は AI 側の詰めの甘さとして明示した。当該ドメインは商業作品の無許諾配信サイトと思われるため、そこからのダウンロードを成立させるための調査（URL 探索・yt-dlp 実行）は行わないと伝えた。
+
+『なぜ m3u8 以外なら追いかけるのか』という質問に対し、ローカルに 2 種類のページ（m3u8 の URL が HTML に文字列として存在するもの / JS が実行時に組み立てるもの）を作って実測。前者は extractor=html5 で成功、後者は ERROR: Unsupported URL。動画も配信方法も同一で違いは『URL が JS 実行前の HTML に存在するか』だけであることを実証した。yt-dlp は JavaScript を実行しないため、これは m3u8 か mp4 かの違いではないと説明。選択肢 A（Referer のユーザー指定）/ B（登録の診断性）/ C（ヘッドレスブラウザ。design.md の WebView 規約に反するため高コスト）を提示し B → A を推奨した。"
+**Context**: 不具合の切り分け（v0.2.3 後）→ 要件 4・5 の起点
+
+---
+
+## 要件 4・5 — 実装（B: 登録の診断性 → A: Referer のユーザー指定）
+**Timestamp**: 2026-09-23T00:00:00Z
+**User Input**: "じゃぁあなたの提案通りBをやってからAもやってください。"
+**AI Response**: "requirements.md に要件 4『登録が拒否された理由をユーザーと調査者に伝える』と要件 5『元ページ URL を指定して再試行』を追記し、対象外に『ページ URL から JavaScript 実行後の m3u8 を発見する』を実測根拠付きで明記。design.md に『拒否した理由を返す（沈黙させない）』『ログのセッション管理』『Referer のユーザー指定（元ページ URL）』の 3 節と PBT-01 プロパティ表を追加。
+
+TDD 6 サイクル（各サイクルで go test の赤を確認）。B: AddResult 型 / addRejection / addRejectionMessage を追加し AddToQueue の戻り値を string から AddResult へ変更、maxLogBytes / shouldRotateLog / startLogSession / appendLog を追加して truncateLog を廃止（起動でログを消さず上限 5 MiB 超過時だけ 1 世代退避）、FetchPlaylist に開始・失敗（ExitError.Stderr 含む）・解析失敗・成功件数・各エントリのログを追加。A: effectiveReferer を追加、buildYtDlpArgs に refererOverride 引数を追加（既存 8 箇所の呼び出しを更新）、DownloadItem.Referer を追加、RetryDownload の初期化を resetForRetry へ切り出して RetryWithReferer と共有。
+
+フロントエンド: AddToQueue の戻り値を無視できない薄いラッパ addToQueue と非ブロッキング通知バナー showNotice（textContent で挿入し innerHTML を使わない）、エラーアイテムの ⤴ ボタンと元ページ URL 入力モーダル。
+
+実装中の判断 3 件をプランに記録: (1) emit に nil ctx ガードを追加（startup 前は通知先が存在せず、これがないと App のメソッドを単体テストできない）、(2) logDirOverride というテスト用の差し替え口を導入（テストが実ログを汚すと、まさに信頼性を上げようとしているログをノイズで壊す）、(3) ログを『消さない』ではなく『上限超過で 1 世代退避』にした（際限ない膨張を防ぎ、消す経路を 1 箇所に限る）。
+
+PBT を 6 件追加（addRejection の Oracle、addRejectionMessage の沈黙禁止、shouldRotateLog の単調性、effectiveReferer の '-' 始まり禁止・指定の優先・フォールバック）。make check 成功、81 テスト通過（PBT 32 + 例示ベース 49。前回 67 件から +14）。GOOS=windows の build と vet も通過。実機の手動確認とコミットは未実施。"
+**Context**: CONSTRUCTION - Code Generation / Build and Test（要件 4・5 完了・手動確認待ち）
+
+---
+

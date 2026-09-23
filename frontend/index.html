@@ -87,6 +87,8 @@
     #ffmpeg-banner span { color: #a0a0d0; }
     #m3u8-banner   { background: #2a2413; border: 1px solid #5a4a1a; }
     #m3u8-banner span { color: #e0b858; }
+    #notice-banner { background: #2a2413; border: 1px solid #5a4a1a; }
+    #notice-banner span { color: #e0b858; white-space: pre-line; }
 
     /* ---- card ---- */
     .card {
@@ -301,6 +303,13 @@
     <button class="sm" onclick="dismissM3U8Notice()">閉じる</button>
   </div>
 
+  <!-- 登録が拒否された理由を伝える。黙って消えてはならない。
+       requirements.md「登録が拒否された理由をユーザーと調査者に伝える」参照。 -->
+  <div id="notice-banner" class="banner">
+    <span id="notice-msg"></span>
+    <button class="sm" onclick="dismissNotice()">閉じる</button>
+  </div>
+
   <div class="card">
     <div class="url-row">
       <input type="text" id="url-input" placeholder="動画の URL を入力（ウィンドウのどこにでもドラッグ&ドロップ可）…"
@@ -338,6 +347,31 @@
         <div class="modal-btns">
           <button class="btn-secondary" onclick="closeModal()">キャンセル</button>
           <button id="modal-add-btn" onclick="confirmPlaylist()">キューに追加</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 元ページ URL（Referer）の入力モーダル。
+       プレイリスト選択モーダルとは別物で、ユーザー操作を起点に開くため直列化キューには載せない。
+       requirements.md「元ページ URL を指定して再試行」参照。 -->
+  <div class="modal-overlay" id="referer-modal">
+    <div class="modal">
+      <h2>元ページ URL を指定して再試行</h2>
+      <div class="modal-list" style="padding: 4px 2px">
+        <p style="margin: 0 0 10px; font-size: 13px; color: var(--dim); line-height: 1.6">
+          動画が置かれていたページの URL を入れてください。Referer として送ります。<br>
+          プレイヤーや配信元が視聴ページと別ドメインにある場合、これがないと 403 で弾かれることがあります。
+        </p>
+        <input type="text" id="referer-input" placeholder="https://example.com/video/123/"
+               style="width: 100%" onkeydown="if(event.key==='Enter') confirmReferer()" />
+        <div id="referer-error" style="margin-top: 8px; font-size: 12px; color: var(--err)"></div>
+      </div>
+      <div class="modal-footer">
+        <span class="modal-sel-count"></span>
+        <div class="modal-btns">
+          <button class="btn-secondary" onclick="closeRefererModal()">キャンセル</button>
+          <button onclick="confirmReferer()">再試行</button>
         </div>
       </div>
     </div>
@@ -419,6 +453,36 @@
       if (el) el.style.display = 'none';
     }
 
+    function dismissNotice() {
+      const el = document.getElementById('notice-banner');
+      if (el) el.style.display = 'none';
+    }
+
+    // showNotice: 登録が拒否された理由などを非ブロッキングで伝える。
+    //
+    // alert を使わないのは、ドロップで複数 URL を登録したときにダイアログが
+    // 連続して出て操作を塞ぐため（design.md「ドラッグ&ドロップ入力」の
+    // 「UI をブロックしない」方針と整合させる）。
+    function showNotice(msgs) {
+      const list = (Array.isArray(msgs) ? msgs : [msgs]).filter(Boolean);
+      if (list.length === 0) return;
+      const el = document.getElementById('notice-banner');
+      const span = document.getElementById('notice-msg');
+      if (!el || !span) return;
+      // リモート由来の文字列が混ざりうるので textContent で入れる（innerHTML を使わない）。
+      span.textContent = [...new Set(list)].join('\n');
+      el.style.display = 'flex';
+    }
+
+    // addToQueue: AddToQueue の結果を必ず確認する薄いラッパ。
+    // 拒否理由を無視すると「開始もせずリストから消えた」ように見えてしまう。
+    async function addToQueue(url) {
+      const r = await window.go.main.App.AddToQueue(url, saveDir);
+      // 旧シグネチャ（文字列）との取り違えを防ぐため、オブジェクト以外は拒否扱いにしない。
+      if (r && typeof r === 'object' && r.reason) return r.message || ('登録できませんでした（' + r.reason + '）');
+      return '';
+    }
+
     // m3u8 の URL は有効期限トークン付きが多く、待ちキューに寝かせている間に失効する。
     // 同時ダウンロード数が 0（登録のみ）のときだけ注意を出す。
     //
@@ -467,7 +531,8 @@
         try {
           const entries = await window.go.main.App.FetchPlaylist(url);
           if (entries.length === 1) {
-            await window.go.main.App.AddToQueue(entries[0].url, saveDir);
+            // 拒否理由は必ず表示する（黙って消えると原因が誰にも分からない）。
+            showNotice(await addToQueue(entries[0].url));
           } else {
             modalQueue.push(entries);
             tryOpenNextModal();
@@ -593,9 +658,14 @@
       const selected = [];
       checks.forEach((c, i) => { if (c.checked) selected.push(pendingEntries[i]); });
       closeModal();
+      // 複数件をまとめて登録するため、拒否理由は集めて一度に表示する
+      // （件数分のダイアログを出して操作を塞がない）。
+      const msgs = [];
       for (const e of selected) {
-        await window.go.main.App.AddToQueue(e.url, saveDir);
+        const msg = await addToQueue(e.url);
+        if (msg) msgs.push(msg);
       }
+      showNotice(msgs);
     }
 
     async function startDownload(id) {
@@ -612,6 +682,46 @@
 
     async function cancelDownload(id) {
       await window.go.main.App.CancelDownload(id);
+    }
+
+    // 元ページ URL（Referer）の入力モーダル。対象アイテムの id を保持する。
+    let refererTargetId = null;
+
+    function openRefererModal(id) {
+      refererTargetId = id;
+      const input = document.getElementById('referer-input');
+      const err = document.getElementById('referer-error');
+      if (err) err.textContent = '';
+      if (input) {
+        // 既に指定済みなら初期値として出す（付け直しやすくするため）。
+        const d = downloads[id];
+        input.value = (d && d.referer) ? d.referer : '';
+      }
+      document.getElementById('referer-modal').classList.add('open');
+      if (input) input.focus();
+    }
+
+    function closeRefererModal() {
+      refererTargetId = null;
+      document.getElementById('referer-modal').classList.remove('open');
+    }
+
+    async function confirmReferer() {
+      if (!refererTargetId) return;
+      const input = document.getElementById('referer-input');
+      const err = document.getElementById('referer-error');
+      const page = (input ? input.value : '').trim();
+      try {
+        // Go 側が検証し、拒否理由を文言で返す（"" なら成功）。
+        const msg = await window.go.main.App.RetryWithReferer(refererTargetId, page);
+        if (msg) {
+          if (err) err.textContent = msg;
+          return;
+        }
+        closeRefererModal();
+      } catch (e) {
+        if (err) err.textContent = '再試行できませんでした: ' + e;
+      }
     }
 
     async function retryDownload(id) {
@@ -758,8 +868,12 @@
             <button class="ghost cancel" onclick="cancelDownload('${esc(d.id)}')" title="キャンセル">×</button>
           `;
         } else if (d.status === 'error') {
+          // ⤴ は「元ページ URL を Referer として指定して再試行」。
+          // 自動導出（m3u8 のオリジン）はプレイヤーが別ドメインの構成では効かないため。
+          // requirements.md「元ページ URL を指定して再試行」参照。
           actions = `
             <button class="ghost start" onclick="retryDownload('${esc(d.id)}')" title="リトライ">⟳</button>
+            <button class="ghost" onclick="openRefererModal('${esc(d.id)}')" title="元ページ URL を指定して再試行">⤴</button>
             <button class="ghost cancel" onclick="cancelDownload('${esc(d.id)}')" title="リストから削除">×</button>
           `;
         }
